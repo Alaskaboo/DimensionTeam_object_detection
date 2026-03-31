@@ -61,14 +61,6 @@ python enhanced_ui_main.py
 
 ---
 
-## 交流群及我个人微信
-
-<div align="center">
-<img src="utils/img/QQ%E7%BE%A4.jpg" alt="QQ 群" width="150"/>
-<img src="utils/img/%E4%B8%AA%E4%BA%BA%E5%BE%AE%E4%BF%A1.png" alt="个人微信" width="150"/>
-<img src="utils/img/%E5%BE%AE%E4%BF%A1%E7%BE%A421.png" alt="微信群" width="150"/>
-</div>
-
 ### 特殊说明（模型权重相关）
 
 - 您可以使用自己数据集训练的YOLO权重（没改变模型结构）
