@@ -1,0 +1,10 @@
+{
+  "Drone": {
+    "model_name": "best.pt",
+    "confidence_threshold": 0.47,
+    "source_type": "image",
+    "source_path": null,
+    "save_dir": "e:\\Code\\DimensionTeam_object_detection\\results",
+    "camera_id": -1
+  }
+}
