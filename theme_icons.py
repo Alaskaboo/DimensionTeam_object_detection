@@ -70,5 +70,20 @@ class ThemeIcons:
         return cls._cache[key]
 
     @classmethod
+    def icon_same_when_disabled(
+        cls, name: str, size: int = 20, color: str = "#6366f1"
+    ) -> QIcon:
+        """禁用态仍使用主色图标，避免 QPushButton:disabled 将图标压成灰色。"""
+        key = f"{name}:{size}:{color}:sameDis"
+        if key not in cls._cache:
+            pm = cls.pixmap(name, size, color)
+            ic = QIcon()
+            ic.addPixmap(pm, QIcon.Mode.Normal, QIcon.State.Off)
+            ic.addPixmap(pm, QIcon.Mode.Disabled, QIcon.State.Off)
+            ic.addPixmap(pm, QIcon.Mode.Active, QIcon.State.Off)
+            cls._cache[key] = ic
+        return cls._cache[key]
+
+    @classmethod
     def clear_cache(cls):
         cls._cache.clear()

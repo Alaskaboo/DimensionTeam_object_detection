@@ -6,7 +6,7 @@ import re
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import cv2
@@ -1263,11 +1263,135 @@ class ModelSelectionDialog(QDialog):
         super().accept()
 
 
+_DETECTION_EXPORT_META_ORDER = (
+    "应用",
+    "主界面页签",
+    "结果记录时间",
+    "推算推理开始时间",
+    "推算推理结束时间",
+    "本帧推理耗时_s",
+    "理论推理帧率_FPS",
+    "模型文件路径",
+    "模型名称",
+    "置信度阈值",
+    "输入类型",
+    "输入来源",
+    "检测目标总数",
+    "类别种数",
+    "平均置信度",
+    "置信度最小值",
+    "置信度最大值",
+    "类别分布",
+    "备注",
+)
+
+_DETECTION_EXPORT_DETAIL_FIELDS = [
+    "序号", "类别", "置信度", "x1", "y1", "x2", "y2",
+    "宽", "高", "面积",
+]
+
+
+class TaskHistoryWidget(QWidget):
+    """底部「历史任务」：表格记录近期任务摘要。"""
+
+    _COLS = ["时间", "任务类型", "来源", "模型", "目标数", "耗时(s)", "备注"]
+    MAX_ROWS = 200
+
+    def __init__(self):
+        super().__init__()
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        bar = QHBoxLayout()
+        bar.setContentsMargins(8, 4, 8, 0)
+        bar.setSpacing(8)
+        bar.addStretch(1)
+        self.clear_btn = QPushButton("清空历史")
+        self.clear_btn.setObjectName("toolBtn")
+        self.clear_btn.setIcon(ThemeIcons.icon("eraser", 16, "#6366f1"))
+        self.clear_btn.setIconSize(QSize(16, 16))
+        self.clear_btn.setMinimumHeight(32)
+        self.clear_btn.clicked.connect(self._on_clear)
+        bar.addWidget(self.clear_btn, 0, Qt.AlignTop)
+        layout.addLayout(bar)
+
+        self.table = QTableWidget(0, len(self._COLS))
+        self.table.setObjectName("wfHistoryTable")
+        self.table.setHorizontalHeaderLabels(self._COLS)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setMinimumHeight(160)
+        _hh = self.table.horizontalHeader()
+        for i in range(6):
+            _hh.setSectionResizeMode(
+                i, QHeaderView.ResizeMode.ResizeToContents)
+        _hh.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+        self.table.setItemDelegate(NoFocusTableItemDelegate(self.table))
+        self.table.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        layout.addWidget(self.table, 1)
+
+    def _on_clear(self):
+        self.table.setRowCount(0)
+
+    def add_record(
+        self,
+        time_str: str,
+        task_type: str,
+        source: str,
+        model: str,
+        objects: int,
+        inference_s: float,
+        note: str = "",
+    ):
+        while self.table.rowCount() >= self.MAX_ROWS:
+            self.table.removeRow(self.table.rowCount() - 1)
+        self.table.insertRow(0)
+        vals = [
+            time_str,
+            task_type,
+            source,
+            model,
+            str(objects),
+            f"{inference_s:.4f}",
+            note,
+        ]
+        for c, text in enumerate(vals):
+            it = QTableWidgetItem(text)
+            it.setTextAlignment(Qt.AlignCenter)
+            if c in (2, 6):
+                it.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            self.table.setItem(0, c, it)
+
+
+class NoFocusTableItemDelegate(QStyledItemDelegate):
+    """绘制单元格时不画焦点虚线框，点击后仍保留选中底色。"""
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.state &= ~QStyle.StateFlag.State_HasFocus
+        super().paint(painter, opt, index)
+
+
 class DetectionResultWidget(QWidget):
     """检测结果显示组件"""
 
     def __init__(self):
         super().__init__()
+        self._detail_csv_rows = []
+        self._export_meta = {}
         self.init_ui()
 
     def init_ui(self):
@@ -1277,25 +1401,60 @@ class DetectionResultWidget(QWidget):
 
         sheet = QFrame()
         sheet.setObjectName("wfResultSheet")
-        sl = QVBoxLayout(sheet)
-        sl.setContentsMargins(0, 0, 0, 0)
+        sl = QHBoxLayout(sheet)
+        sl.setContentsMargins(8, 8, 8, 8)
         sl.setSpacing(0)
 
-        # 五列同表：序号/类别最窄 → 置信度中等 → 坐标较宽 → 尺寸最宽（比例随表格宽度变化）
+        left_panel = QWidget()
+        left_panel.setObjectName("wfResultLeftPanel")
+        lv = QVBoxLayout(left_panel)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(0)
+
+        title_texts = [
+            "序号", "类别", "置信度",
+            "左上 (x1, y1)", "右下 (x2, y2)", "尺寸 (w×h)", "面积",
+        ]
+        _tips = (
+            None,
+            None,
+            None,
+            None,
+            None,
+            "宽 × 高（像素）",
+            "round(宽 × 高)",
+        )
+        hdr_row = QHBoxLayout()
+        hdr_row.setContentsMargins(0, 0, 0, 0)
+        hdr_row.setSpacing(0)
+        self._detail_col_title_labels = []
+        for idx, (text, tip) in enumerate(zip(title_texts, _tips)):
+            lab = QLabel(text)
+            lab.setObjectName("wfResultColTitle")
+            lab.setAlignment(Qt.AlignCenter)
+            lab.setMinimumHeight(40)
+            if idx == len(title_texts) - 1:
+                lab.setProperty("edgeLast", True)
+            if tip:
+                lab.setToolTip(tip)
+            hdr_row.addWidget(lab, 1)
+            self._detail_col_title_labels.append(lab)
+        hdr_wrap = QWidget()
+        hdr_wrap.setObjectName("wfResultColHeaderRow")
+        hdr_wrap.setLayout(hdr_row)
+        lv.addWidget(hdr_wrap, 0)
+
         self.result_table = QTableWidget()
         self.result_table.setObjectName("wfResultTable")
-        self.result_table.setColumnCount(5)
-        self.result_table.setHorizontalHeaderLabels(
-            ["序号", "类别", "置信度", "坐标", "尺寸"])
+        self.result_table.setColumnCount(7)
+        self.result_table.setHorizontalHeaderLabels(title_texts)
         _hdr = self.result_table.horizontalHeader()
-        _hdr.setDefaultAlignment(Qt.AlignCenter)
-        _hdr.setHighlightSections(False)
-        for i in range(5):
-            _hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
+        _hdr.setVisible(False)
         self.result_table.verticalHeader().setVisible(False)
         self.result_table.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.result_table.setMinimumHeight(200)
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.result_table.setMinimumHeight(148)
+        self.result_table.setMaximumHeight(300)
         self.result_table.setAlternatingRowColors(True)
         self.result_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.result_table.verticalScrollBar().rangeChanged.connect(
@@ -1306,8 +1465,11 @@ class DetectionResultWidget(QWidget):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
         )
+        self.result_table.setItemDelegate(
+            NoFocusTableItemDelegate(self.result_table))
+        lv.addWidget(self.result_table, 1)
 
-        sl.addWidget(self.result_table, 1)
+        sl.addWidget(left_panel, 1)
         layout.addWidget(sheet, 1)
 
         # 统计信息
@@ -1330,24 +1492,162 @@ class DetectionResultWidget(QWidget):
         layout.setSpacing(10)
 
     def _sync_result_table_column_widths(self):
-        """与底部 Tab 同宽铺满；序号/类别/置信度收窄，坐标/尺寸略左移（比例上多占宽）。"""
+        """七列表体与自定义表头等分同宽（严格执行均匀列宽）。"""
         t = self.result_table
         vw = t.viewport().width()
         if vw < 80:
             return
-        budget = max(260, vw - 2)
-        fr = (0.035, 0.075, 0.09, 0.34, 0.46)
-        mins = (32, 48, 56, 88, 96)
-        widths = [max(mins[i], int(budget * fr[i])) for i in range(5)]
-        s = sum(widths)
-        if s > budget:
-            scale = budget / s
-            widths = [max(mins[i], int(widths[i] * scale)) for i in range(5)]
-        diff = budget - sum(widths)
-        if diff != 0:
-            widths[-1] += diff
-        for i, w in enumerate(widths):
-            t.setColumnWidth(i, w)
+        n = 7
+        base = max(1, vw // n)
+        for i in range(n):
+            t.setColumnWidth(i, base)
+        rem = vw - sum(t.columnWidth(i) for i in range(n))
+        if rem > 0:
+            t.setColumnWidth(n - 1, t.columnWidth(n - 1) + rem)
+
+    def export_detection_detail(self, fmt: str):
+        """导出检测明细。fmt: csv / json / txt / xlsx"""
+        if not self._detail_csv_rows:
+            QMessageBox.information(
+                self.window(), "提示", "暂无检测明细可导出，请先运行检测。")
+            return
+        stem = f"detection_detail_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        dialogs = {
+            "csv": (
+                "导出检测明细 — CSV",
+                f"{stem}.csv",
+                "CSV 表格 (*.csv)",
+            ),
+            "json": (
+                "导出检测明细 — JSON",
+                f"{stem}.json",
+                "JSON 文件 (*.json)",
+            ),
+            "txt": (
+                "导出检测明细 — 文本",
+                f"{stem}.txt",
+                "文本文件 (*.txt)",
+            ),
+            "xlsx": (
+                "导出检测明细 — Excel",
+                f"{stem}.xlsx",
+                "Excel 工作簿 (*.xlsx)",
+            ),
+        }
+        if fmt not in dialogs:
+            return
+        title, default_name, filt = dialogs[fmt]
+        save_path, _ = QFileDialog.getSaveFileName(
+            self.window(),
+            title,
+            str((base_dir / default_name).resolve()),
+            f"{filt};;所有文件 (*)",
+        )
+        if not save_path:
+            return
+        try:
+            if fmt == "csv":
+                self._write_export_csv(save_path)
+            elif fmt == "json":
+                self._write_export_json(save_path)
+            elif fmt == "txt":
+                self._write_export_txt(save_path)
+            else:
+                if not self._write_export_xlsx(save_path):
+                    return
+            win = self.window()
+            if hasattr(win, "log_message"):
+                win.log_message(f"检测明细已导出 ({fmt.upper()}): {save_path}")
+        except Exception as e:
+            QMessageBox.warning(self.window(), "导出失败", str(e))
+
+    def _write_export_csv(self, save_path: str):
+        export_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(save_path, "w", encoding="utf-8-sig", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["【指标项】", "【值】"])
+            w.writerow(["导出时间", export_time])
+            for key in _DETECTION_EXPORT_META_ORDER:
+                if key in self._export_meta:
+                    val = self._export_meta[key]
+                    w.writerow([key, val if val is not None else ""])
+            w.writerow([])
+            w.writerow(["【目标明细】", ""])
+            dw = csv.DictWriter(
+                f, fieldnames=_DETECTION_EXPORT_DETAIL_FIELDS,
+                extrasaction="ignore")
+            dw.writeheader()
+            dw.writerows(self._detail_csv_rows)
+
+    def _write_export_json(self, save_path: str):
+        export_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        metrics = {
+            k: self._export_meta[k]
+            for k in _DETECTION_EXPORT_META_ORDER
+            if k in self._export_meta
+        }
+        payload = {
+            "format": "Dimension_detection_export",
+            "version": 1,
+            "export_time_local": export_time,
+            "metrics": metrics,
+            "detections": self._detail_csv_rows,
+        }
+        with open(save_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    def _write_export_txt(self, save_path: str):
+        export_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        lines = [
+            "Dimension 目标检测 — 检测明细导出",
+            "=" * 48,
+            f"导出时间: {export_time}",
+            "",
+            "【汇总指标】",
+            "-" * 48,
+        ]
+        for key in _DETECTION_EXPORT_META_ORDER:
+            if key in self._export_meta:
+                v = self._export_meta[key]
+                lines.append(f"{key}: {v if v is not None else ''}")
+        lines.extend([
+            "",
+            "【目标明细】",
+            "-" * 48,
+            "\t".join(_DETECTION_EXPORT_DETAIL_FIELDS),
+        ])
+        for row in self._detail_csv_rows:
+            lines.append(
+                "\t".join(
+                    str(row.get(k, "")) for k in _DETECTION_EXPORT_DETAIL_FIELDS))
+        Path(save_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def _write_export_xlsx(self, save_path: str) -> bool:
+        try:
+            from openpyxl import Workbook
+        except ImportError:
+            QMessageBox.warning(
+                self.window(),
+                "缺少依赖",
+                "导出 Excel 需要安装 openpyxl：\npip install openpyxl",
+            )
+            return False
+        export_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        wb = Workbook()
+        ws1 = wb.active
+        ws1.title = "汇总指标"
+        ws1.append(["指标项", "值"])
+        ws1.append(["导出时间", export_time])
+        for key in _DETECTION_EXPORT_META_ORDER:
+            if key in self._export_meta:
+                v = self._export_meta[key]
+                ws1.append([key, v if v is not None else ""])
+        ws2 = wb.create_sheet("目标明细")
+        ws2.append(_DETECTION_EXPORT_DETAIL_FIELDS)
+        for row in self._detail_csv_rows:
+            ws2.append([row.get(k) for k in _DETECTION_EXPORT_DETAIL_FIELDS])
+        wb.save(save_path)
+        return True
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1361,6 +1661,11 @@ class DetectionResultWidget(QWidget):
         """更新检测结果"""
         if not results or not results[0].boxes or len(results[0].boxes) == 0:
             self.result_table.setRowCount(0)
+            self._detail_csv_rows = []
+            self._export_meta = {}
+            win = self.window()
+            if hasattr(win, "export_detail_btn"):
+                win.export_detail_btn.setEnabled(False)
             self.stats_label.setText("未检测到目标")
             return
 
@@ -1371,6 +1676,7 @@ class DetectionResultWidget(QWidget):
 
         # 更新表格
         self.result_table.setRowCount(len(confidences))
+        self._detail_csv_rows = []
 
         class_counts = {}
         for i, (conf, cls, box) in enumerate(zip(confidences, classes, xyxy)):
@@ -1380,8 +1686,12 @@ class DetectionResultWidget(QWidget):
             # 统计类别数量
             class_counts[class_name] = class_counts.get(class_name, 0) + 1
 
-            self.result_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-            self.result_table.setItem(i, 1, QTableWidgetItem(class_name))
+            idx_item = QTableWidgetItem(str(i + 1))
+            idx_item.setTextAlignment(Qt.AlignCenter)
+            self.result_table.setItem(i, 0, idx_item)
+            cls_item = QTableWidgetItem(class_name)
+            cls_item.setTextAlignment(Qt.AlignCenter)
+            self.result_table.setItem(i, 1, cls_item)
 
             # 置信度带颜色
             conf_item = QTableWidgetItem(f"{conf:.3f}")
@@ -1391,19 +1701,132 @@ class DetectionResultWidget(QWidget):
                 conf_item.setBackground(QColor(245, 158, 11, 55))
             else:
                 conf_item.setBackground(QColor(248, 113, 113, 55))
+            conf_item.setTextAlignment(Qt.AlignCenter)
             self.result_table.setItem(i, 2, conf_item)
 
-            self.result_table.setItem(
-                i, 3, QTableWidgetItem(f"({box[0]:.0f},{box[1]:.0f})"))
-            self.result_table.setItem(i, 4, QTableWidgetItem(
-                f"{box[2] - box[0]:.0f}×{box[3] - box[1]:.0f}"))
+            bw = box[2] - box[0]
+            bh = box[3] - box[1]
+            area_px = max(0, int(round(bw * bh)))
+            tl_txt = f"{box[0]:.1f}, {box[1]:.1f}"
+            br_txt = f"{box[2]:.1f}, {box[3]:.1f}"
+            size_txt = f"{bw:.2f} × {bh:.2f}"
+            cell_tl = QTableWidgetItem(tl_txt)
+            cell_tl.setTextAlignment(Qt.AlignCenter)
+            cell_tl.setToolTip(f"({box[0]:.4f}, {box[1]:.4f})")
+            self.result_table.setItem(i, 3, cell_tl)
+            cell_br = QTableWidgetItem(br_txt)
+            cell_br.setTextAlignment(Qt.AlignCenter)
+            cell_br.setToolTip(f"({box[2]:.4f}, {box[3]:.4f})")
+            self.result_table.setItem(i, 4, cell_br)
+            cell_sz = QTableWidgetItem(size_txt)
+            cell_sz.setTextAlignment(Qt.AlignCenter)
+            cell_sz.setToolTip(f"宽 {bw:.4f} px · 高 {bh:.4f} px")
+            self.result_table.setItem(i, 5, cell_sz)
+            cell_area = QTableWidgetItem(str(area_px))
+            cell_area.setTextAlignment(Qt.AlignCenter)
+            cell_area.setToolTip(f"{size_txt} → {area_px}")
+            self.result_table.setItem(i, 6, cell_area)
 
+            self._detail_csv_rows.append({
+                "序号": i + 1,
+                "类别": class_name,
+                "置信度": round(float(conf), 6),
+                "x1": round(float(box[0]), 2),
+                "y1": round(float(box[1]), 2),
+                "x2": round(float(box[2]), 2),
+                "y2": round(float(box[3]), 2),
+                "宽": round(float(bw), 2),
+                "高": round(float(bh), 2),
+                "面积": area_px,
+            })
+
+        end_local = datetime.now()
+        try:
+            inf_s = float(inference_time)
+            start_local = end_local - timedelta(seconds=inf_s)
+        except Exception:
+            inf_s = 0.0
+            start_local = end_local
+
+        win = self.window()
+        model_path = ""
+        if hasattr(win, "_loaded_model_path") and win._loaded_model_path:
+            model_path = str(win._loaded_model_path)
+        elif hasattr(win, "model") and win.model is not None:
+            ckpt = getattr(win.model, "ckpt_path", None)
+            if ckpt:
+                try:
+                    model_path = str(Path(ckpt).resolve())
+                except Exception:
+                    model_path = str(ckpt)
+
+        model_name = ""
+        if hasattr(win, "model_combo"):
+            model_name = win.model_combo.currentText()
+
+        main_tab = ""
+        if hasattr(win, "tab_widget"):
+            _ti = win.tab_widget.currentIndex()
+            _tabs = ["实时检测", "批量分析", "设备监控"]
+            if 0 <= _ti < len(_tabs):
+                main_tab = _tabs[_ti]
+
+        src_type = getattr(win, "current_source_type", "") or ""
+        src_type_cn = {
+            "image": "单张图片",
+            "video": "视频文件",
+            "camera": "摄像头",
+            "batch": "文件夹批量",
+        }.get(src_type, src_type)
+
+        src_detail = ""
+        if hasattr(win, "current_file_label"):
+            src_detail = (
+                win.current_file_label.toolTip().strip()
+                or win.current_file_label.text().strip()
+            )
+
+        total_objects = len(confidences)
+        avg_confidence = float(np.mean(confidences))
+        cmin = float(np.min(confidences))
+        cmax = float(np.max(confidences))
+        class_summary_str = " | ".join(
+            [f"{n}:{c}" for n, c in class_counts.items()])
+
+        tfps = ""
+        if inf_s > 1e-12:
+            tfps = round(1.0 / inf_s, 4)
+
+        self._export_meta = {
+            "应用": "Dimension 目标检测系统",
+            "主界面页签": main_tab or "—",
+            "结果记录时间": end_local.strftime("%Y-%m-%d %H:%M:%S"),
+            "推算推理开始时间": start_local.strftime("%Y-%m-%d %H:%M:%S"),
+            "推算推理结束时间": end_local.strftime("%Y-%m-%d %H:%M:%S"),
+            "本帧推理耗时_s": round(inf_s, 6),
+            "理论推理帧率_FPS": tfps,
+            "模型文件路径": model_path or "—",
+            "模型名称": model_name or "—",
+            "置信度阈值": getattr(win, "confidence_threshold", 0.25),
+            "输入类型": src_type_cn or "—",
+            "输入来源": src_detail or "—",
+            "检测目标总数": total_objects,
+            "类别种数": len(class_counts),
+            "平均置信度": round(avg_confidence, 6),
+            "置信度最小值": round(cmin, 6),
+            "置信度最大值": round(cmax, 6),
+            "类别分布": class_summary_str,
+            "备注": (
+                "推算推理起止时间：由本机收到该帧结果的时刻与引擎返回的本帧推理耗时反推，"
+                "用于时间轴对照；非 GPU 硬件级精确计时。"
+            ),
+        }
+
+        if hasattr(win, "export_detail_btn"):
+            win.export_detail_btn.setEnabled(True)
         self._sync_result_table_column_widths()
 
         # 更新统计信息
-        total_objects = len(confidences)
-        avg_confidence = np.mean(confidences)
-
         stats_text = f"检测到 {total_objects} 个目标 | "
         stats_text += f"平均置信度: {avg_confidence:.3f} | "
         stats_text += f"耗时: {inference_time:.3f} 秒\n"
@@ -1428,11 +1851,8 @@ class MonitoringWidget(QWidget):
 
     def init_ui(self):
         layout = QVBoxLayout(self)
-        hint = QLabel("监控使用右侧“输入源”的摄像头设置；开始/暂停/停止使用顶部统一按钮。")
-        hint.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        hint.setContentsMargins(8, 0, 8, 0)
-        hint.setStyleSheet("color:#64748b; font-size:12px; padding:4px 6px;")
-        layout.addWidget(hint, 0)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         # 监控显示区域
         self.monitor_scroll = QScrollArea()
@@ -1598,6 +2018,10 @@ class MonitoringWidget(QWidget):
             self.camera_labels[camera_id]['status'].setText(
                 f"状态: 无目标 | 耗时: {inference_time:.3f}s"
             )
+
+        win = self.window()
+        if hasattr(win, "_update_history_snapshot"):
+            win._update_history_snapshot(results, class_names, inference_time)
 
     def handle_camera_error(self, camera_id, error_msg):
         """处理摄像头错误"""
@@ -1978,9 +2402,33 @@ class StyleManager:
             }
 
             QFrame#wfResultSheet {
-                background: #ffffff;
-                border: 1px solid #d1d5db;
-                border-radius: 8px;
+                background: #fafbfc;
+                border: 1px solid #e2e8f0;
+                border-radius: 12px;
+            }
+
+            QWidget#wfResultColHeaderRow {
+                background: transparent;
+                border: 1px solid #e2e8f0;
+                border-bottom: none;
+                border-top-left-radius: 10px;
+                border-top-right-radius: 10px;
+            }
+            QLabel#wfResultColTitle {
+                background: #f1f5f9;
+                color: #475569;
+                font-size: 12px;
+                font-weight: 600;
+                padding: 10px 6px;
+                border-right: 1px solid #e2e8f0;
+                border-bottom: 1px solid #e2e8f0;
+                min-height: 40px;
+            }
+            QLabel#wfResultColTitle[edgeLast="true"] {
+                border-right: none;
+            }
+            QWidget#wfResultLeftPanel {
+                background: transparent;
             }
 
             QWidget#runButtonsCorner {
@@ -2167,20 +2615,76 @@ class StyleManager:
             }
 
             QTableWidget#wfResultTable {
-                border: none;
-                border-bottom-left-radius: 8px;
-                border-bottom-right-radius: 8px;
+                border: 1px solid #e2e8f0;
+                border-top: none;
+                border-radius: 0 0 10px 10px;
                 background: #ffffff;
-                gridline-color: #f1f5f9;
+                gridline-color: #cbd5e1;
+                font-size: 13px;
+                color: #0f172a;
+                alternate-background-color: #f8fafc;
+            }
+            QTableWidget#wfResultTable::item {
+                padding: 8px 10px;
+                border: none;
+                outline: none;
+            }
+            QTableWidget#wfResultTable::item:focus {
+                outline: none;
+                border: none;
+            }
+            QTableWidget#wfResultTable:focus {
+                outline: none;
+            }
+            QTableWidget#wfResultTable::item:selected {
+                background: rgba(99, 102, 241, 0.12);
+                color: #0f172a;
             }
             QTableWidget#wfResultTable QHeaderView::section {
-                background: #4a86e8;
-                color: #ffffff;
-                padding: 8px 6px;
+                background: #f1f5f9;
+                color: #475569;
+                padding: 10px 10px;
                 font-size: 12px;
                 font-weight: 600;
                 border: none;
-                border-right: 1px solid rgba(255, 255, 255, 0.28);
+                border-right: 1px solid #e2e8f0;
+                border-bottom: 1px solid #e2e8f0;
+            }
+
+            QTableWidget#wfHistoryTable {
+                border: 1px solid #e2e8f0;
+                border-radius: 10px;
+                background: #ffffff;
+                gridline-color: #cbd5e1;
+                font-size: 13px;
+                color: #0f172a;
+                alternate-background-color: #f8fafc;
+            }
+            QTableWidget#wfHistoryTable::item {
+                padding: 6px 8px;
+                border: none;
+                outline: none;
+            }
+            QTableWidget#wfHistoryTable::item:focus {
+                outline: none;
+                border: none;
+            }
+            QTableWidget#wfHistoryTable:focus {
+                outline: none;
+            }
+            QTableWidget#wfHistoryTable::item:selected {
+                background: rgba(99, 102, 241, 0.12);
+                color: #0f172a;
+            }
+            QTableWidget#wfHistoryTable QHeaderView::section {
+                background: #f1f5f9;
+                color: #475569;
+                padding: 8px 8px;
+                font-size: 12px;
+                font-weight: 600;
+                border: none;
+                border-right: 1px solid #e2e8f0;
+                border-bottom: 1px solid #e2e8f0;
             }
 
             QFrame#headerPill {
@@ -2369,6 +2873,78 @@ class StyleManager:
                 background: #eef2ff;
             }
 
+            QToolButton[variant="secondary"] {
+                background: #ffffff;
+                border: 1px solid #e2e8f0;
+                color: #475569;
+                padding: 8px 14px;
+                font-size: 12px;
+                font-weight: 600;
+                border-radius: 10px;
+                min-height: 32px;
+            }
+            QToolButton[variant="secondary"]:hover {
+                background: #f8fafc;
+                border-color: #c7d2fe;
+                color: #312e81;
+            }
+            QToolButton[variant="secondary"]:pressed {
+                background: #eef2ff;
+            }
+            QToolButton[variant="secondary"]:disabled {
+                background: #e2e8f0;
+                color: #94a3b8;
+            }
+
+            /* 任务概览：导出检测明细 — 下拉箭头紧跟文案右侧垂直居中，与侧栏次要按钮同系 */
+            QToolButton#exportDetailMenuBtn {
+                background: #ffffff;
+                border: 1px solid #e2e8f0;
+                color: #475569;
+                padding: 6px 12px 6px 12px;
+                padding-right: 26px;
+                font-size: 12px;
+                font-weight: 600;
+                border-radius: 10px;
+                min-height: 32px;
+            }
+            QToolButton#exportDetailMenuBtn:hover {
+                background: #f8fafc;
+                border-color: #c7d2fe;
+                color: #312e81;
+            }
+            QToolButton#exportDetailMenuBtn:pressed {
+                background: #eef2ff;
+            }
+            QToolButton#exportDetailMenuBtn:disabled {
+                background: #e2e8f0;
+                color: #94a3b8;
+            }
+            QToolButton#exportDetailMenuBtn::menu-indicator {
+                subcontrol-origin: padding;
+                subcontrol-position: right center;
+                width: 12px;
+                height: 10px;
+                margin-right: 6px;
+            }
+
+            QMenu#exportDetailMenu {
+                background: #ffffff;
+                border: 1px solid #e2e8f0;
+                border-radius: 10px;
+                padding: 6px 0;
+            }
+            QMenu#exportDetailMenu::item {
+                padding: 9px 28px 9px 16px;
+                color: #334155;
+                font-size: 12px;
+                font-weight: 500;
+            }
+            QMenu#exportDetailMenu::item:selected {
+                background: #eef2ff;
+                color: #312e81;
+            }
+
             QPushButton[variant="stop"] {
                 background: #64748b;
                 border: none;
@@ -2490,14 +3066,15 @@ class StyleManager:
                 background: transparent;
                 border: 1px solid transparent;
                 border-radius: 10px;
-                padding: 8px 16px;
+                padding: 10px 14px;
                 margin-right: 8px;
                 margin-bottom: 0px;
                 margin-top: 0px;
                 font-weight: 600;
                 font-size: 12px;
                 color: #64748b;
-                min-height: 34px;
+                min-height: 38px;
+                min-width: 96px;
             }
 
             QTabBar#mainTabBar::tab:selected {
@@ -2960,6 +3537,7 @@ class EnhancedDetectionUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.model = None
+        self._loaded_model_path = ""
         self.detection_thread = None
         self.batch_detection_thread = None
         self.current_source_type = 'image'
@@ -2968,6 +3546,8 @@ class EnhancedDetectionUI(QMainWindow):
         self.confidence_threshold = 0.25
         self.batch_results = []
         self.current_batch_index = 0
+        self._history_batch_mode = False
+        self._history_last_snapshot = None
         self.preset_data = {}
         self._delete_confirm_target = None
         self.task_preset_file = base_dir / "task_presets.json"
@@ -3031,7 +3611,9 @@ class EnhancedDetectionUI(QMainWindow):
         if hasattr(self, "tab_widget"):
             tab_bar = self.tab_widget.tabBar()
             if tab_bar is not None:
-                tab_bar.setMinimumHeight(corner_h)
+                # 标签含图标+中文，需高于右侧角标区，避免第三项等被纵向裁切
+                tab_bar_h = max(46, int(round(46 * min(s, 1.15))))
+                tab_bar.setMinimumHeight(tab_bar_h)
             corner = self.tab_widget.cornerWidget(Qt.Corner.TopRightCorner)
             if corner is not None:
                 corner.setMinimumHeight(corner_h)
@@ -3139,10 +3721,8 @@ class EnhancedDetectionUI(QMainWindow):
         self.log_text.setFont(StyleManager.log_mono_font(10))
 
         self.bottom_drawer.addTab(self.result_detail_widget, "检测明细")
-        hist_tab = QLabel("历史任务记录将显示在此处。")
-        hist_tab.setAlignment(Qt.AlignCenter)
-        hist_tab.setObjectName("wfPlaceholder")
-        self.bottom_drawer.addTab(hist_tab, "历史任务")
+        self.task_history_widget = TaskHistoryWidget()
+        self.bottom_drawer.addTab(self.task_history_widget, "历史任务")
         q_tab = QLabel("批处理队列与任务编排将显示在此处。")
         q_tab.setAlignment(Qt.AlignCenter)
         q_tab.setObjectName("wfPlaceholder")
@@ -3354,10 +3934,10 @@ class EnhancedDetectionUI(QMainWindow):
         self.show_model_selection_dialog()
 
     def _focus_task_preset(self):
-        """顶部任务预设入口：定位到右侧任务配置区域。"""
+        """顶部任务预设入口：定位到右侧任务概览中的预设区。"""
         if hasattr(self, "preset_combo"):
             self.preset_combo.setFocus()
-            self.log_message("已定位到任务预设，请在右侧进行新建/修改/删除。")
+            self.log_message("已定位到任务概览中的任务预设，可进行新建/修改/删除。")
 
     def _place_dialog_near_widget(self, dialog, anchor_widget, margin=8):
         """将对话框摆在锚点控件附近（默认紧贴下方），并限制在屏幕工作区内。"""
@@ -3471,7 +4051,7 @@ class EnhancedDetectionUI(QMainWindow):
         return w
 
     def _build_right_sidebar(self):
-        """右侧栏：任务概览 + 运行日志；配置入口统一放到顶部浮层。"""
+        """右侧栏：任务控制 + 任务概览（含任务预设）+ 运行日志；输入源在顶部浮层。"""
         def align_row(r: QHBoxLayout):
             r.setSpacing(12)
             r.setContentsMargins(0, 0, 0, 0)
@@ -3548,54 +4128,6 @@ class EnhancedDetectionUI(QMainWindow):
         self.conf_spinbox.setMinimumHeight(32)
         r_conf.addWidget(self.conf_spinbox)
         tb.addLayout(r_conf)
-
-        r_pre_top = QHBoxLayout()
-        align_row(r_pre_top)
-        r_pre_top.addWidget(self._toolbar_label("任务预设", 64))
-        self.preset_combo = QComboBox()
-        self.preset_combo.setMinimumHeight(32)
-        self.preset_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.preset_combo.currentTextChanged.connect(
-            self.on_preset_selection_changed)
-        r_pre_top.addWidget(self.preset_combo, 1)
-        tb.addLayout(r_pre_top)
-        r_pre_btn = QHBoxLayout()
-        r_pre_btn.setSpacing(8)
-        r_pre_btn.setContentsMargins(0, 0, 0, 0)
-        self.new_preset_btn = QPushButton("新建预设")
-        self._set_btn_icon(self.new_preset_btn, "folder_plus", "#ffffff")
-        self.new_preset_btn.clicked.connect(self.create_new_preset)
-        self.new_preset_btn.setProperty("variant", "skyPrimary")
-        self.new_preset_btn.setMinimumHeight(34)
-        self.new_preset_btn.setMinimumWidth(0)
-        self.new_preset_btn.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.new_preset_btn.setToolTip("基于当前配置创建一个新任务预设")
-        r_pre_btn.addWidget(self.new_preset_btn, 1)
-        self.save_preset_btn = QPushButton("修改预设")
-        self._set_btn_icon(self.save_preset_btn, "save", "#6366f1")
-        self.save_preset_btn.clicked.connect(self.save_current_preset)
-        self.save_preset_btn.setEnabled(False)
-        self.save_preset_btn.setProperty("variant", "secondary")
-        self.save_preset_btn.setMinimumHeight(34)
-        self.save_preset_btn.setMinimumWidth(0)
-        self.save_preset_btn.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.save_preset_btn.setToolTip("将当前配置保存到已选预设")
-        r_pre_btn.addWidget(self.save_preset_btn, 1)
-        self.delete_preset_btn = QPushButton("删除预设")
-        self._set_btn_icon(self.delete_preset_btn, "trash", "#f8fafc")
-        self.delete_preset_btn.clicked.connect(self.delete_selected_preset)
-        self.delete_preset_btn.setEnabled(False)
-        self.delete_preset_btn.setProperty("variant", "stop")
-        self.delete_preset_btn.setMinimumHeight(34)
-        self.delete_preset_btn.setMinimumWidth(0)
-        self.delete_preset_btn.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.delete_preset_btn.setToolTip("删除当前选中的任务预设")
-        r_pre_btn.addWidget(self.delete_preset_btn, 1)
-        tb.addLayout(r_pre_btn)
 
         # —— 输入源 ——
         self.source_card = QFrame()
@@ -3707,6 +4239,54 @@ class EnhancedDetectionUI(QMainWindow):
         ob = QVBoxLayout(overview_body)
         ob.setContentsMargins(10, 12, 10, 12)
         ob.setSpacing(8)
+
+        r_pre_top = QHBoxLayout()
+        align_row(r_pre_top)
+        r_pre_top.addWidget(self._toolbar_label("任务预设", 64))
+        self.preset_combo = QComboBox()
+        self.preset_combo.setMinimumHeight(32)
+        self.preset_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.preset_combo.currentTextChanged.connect(
+            self.on_preset_selection_changed)
+        r_pre_top.addWidget(self.preset_combo, 1)
+        ob.addLayout(r_pre_top)
+        r_pre_btn = QHBoxLayout()
+        r_pre_btn.setSpacing(8)
+        r_pre_btn.setContentsMargins(0, 0, 0, 0)
+        self.new_preset_btn = QPushButton("新建预设")
+        self._set_btn_icon(self.new_preset_btn, "folder_plus", "#ffffff")
+        self.new_preset_btn.clicked.connect(self.create_new_preset)
+        self.new_preset_btn.setProperty("variant", "skyPrimary")
+        self.new_preset_btn.setMinimumHeight(34)
+        self.new_preset_btn.setMinimumWidth(0)
+        self.new_preset_btn.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.new_preset_btn.setToolTip("基于当前配置创建一个新任务预设")
+        r_pre_btn.addWidget(self.new_preset_btn, 1)
+        self.save_preset_btn = QPushButton("修改预设")
+        self._set_btn_icon(self.save_preset_btn, "save", "#6366f1")
+        self.save_preset_btn.clicked.connect(self.save_current_preset)
+        self.save_preset_btn.setEnabled(False)
+        self.save_preset_btn.setProperty("variant", "secondary")
+        self.save_preset_btn.setMinimumHeight(34)
+        self.save_preset_btn.setMinimumWidth(0)
+        self.save_preset_btn.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.save_preset_btn.setToolTip("将当前配置保存到已选预设")
+        r_pre_btn.addWidget(self.save_preset_btn, 1)
+        self.delete_preset_btn = QPushButton("删除预设")
+        self._set_btn_icon(self.delete_preset_btn, "trash", "#f8fafc")
+        self.delete_preset_btn.clicked.connect(self.delete_selected_preset)
+        self.delete_preset_btn.setEnabled(False)
+        self.delete_preset_btn.setProperty("variant", "stop")
+        self.delete_preset_btn.setMinimumHeight(34)
+        self.delete_preset_btn.setMinimumWidth(0)
+        self.delete_preset_btn.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.delete_preset_btn.setToolTip("删除当前选中的任务预设")
+        r_pre_btn.addWidget(self.delete_preset_btn, 1)
+        ob.addLayout(r_pre_btn)
 
         mode_row = QHBoxLayout()
         align_row(mode_row)
@@ -3823,12 +4403,34 @@ class EnhancedDetectionUI(QMainWindow):
         self.open_result_dir_btn.setMinimumHeight(34)
         self.open_result_dir_btn.clicked.connect(self._open_output_dir)
         ov_btns.addWidget(self.open_result_dir_btn, 1)
-        self.export_summary_btn = QPushButton("导出摘要")
-        self._set_btn_icon(self.export_summary_btn, "save", "#6366f1")
-        self.export_summary_btn.setProperty("variant", "secondary")
-        self.export_summary_btn.setMinimumHeight(34)
-        self.export_summary_btn.clicked.connect(self._export_task_summary)
-        ov_btns.addWidget(self.export_summary_btn, 1)
+        self.export_detail_btn = QToolButton()
+        self.export_detail_btn.setObjectName("exportDetailMenuBtn")
+        self.export_detail_btn.setText("导出检测明细")
+        self.export_detail_btn.setIcon(
+            ThemeIcons.icon_same_when_disabled("download", 18, "#6366f1"))
+        self.export_detail_btn.setIconSize(QSize(18, 18))
+        self.export_detail_btn.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.export_detail_btn.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.export_detail_btn.setMinimumHeight(34)
+        self.export_detail_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.export_detail_btn.setToolTip(
+            "选择导出格式：CSV / JSON / 文本 / Excel（含汇总指标与目标明细）")
+        _export_menu = QMenu(self.export_detail_btn)
+        _export_menu.setObjectName("exportDetailMenu")
+        for _fid, _label in (
+            ("csv", "CSV 表格（.csv）"),
+            ("json", "JSON 数据（.json）"),
+            ("txt", "纯文本报告（.txt）"),
+            ("xlsx", "Excel 工作簿（.xlsx）"),
+        ):
+            _a = _export_menu.addAction(_label)
+            _a.setData(_fid)
+        self.export_detail_btn.setMenu(_export_menu)
+        _export_menu.triggered.connect(self._on_export_detail_format)
+        self.export_detail_btn.setEnabled(False)
+        ov_btns.addWidget(self.export_detail_btn, 1)
         ob.addLayout(ov_btns)
 
         ov.addWidget(overview_body)
@@ -4049,31 +4651,67 @@ class EnhancedDetectionUI(QMainWindow):
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
-    def _export_task_summary(self):
-        """导出右侧任务概览为文本。"""
-        default_name = f"task_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        save_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "导出任务摘要",
-            str((base_dir / default_name).absolute()),
-            "文本文件 (*.txt)",
-        )
-        if not save_path:
+    def _on_export_detail_format(self, action):
+        """侧栏导出菜单：按所选格式写出检测明细。"""
+        fmt = action.data()
+        if not isinstance(fmt, str) or not hasattr(self, "result_detail_widget"):
             return
-        try:
-            lines = [
-                f"导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                f"当前模式: {self.overview_mode_value.currentText()}",
-                f"当前来源: {self._status_source.text() if hasattr(self, '_status_source') else '-'}",
-                f"当前模型: {self.overview_model_metric_value.text()}",
-                f"目标数: {self.overview_objects_value.text() if hasattr(self, 'overview_objects_value') else '-'}",
-                f"FPS: {self.overview_fps_value.text() if hasattr(self, 'overview_fps_value') else '-'}",
-                f"推理耗时: {self.overview_latency_value.text() if hasattr(self, 'overview_latency_value') else '-'}",
-            ]
-            Path(save_path).write_text("\n".join(lines), encoding="utf-8")
-            self.log_message(f"任务摘要已导出: {save_path}")
-        except Exception as e:
-            QMessageBox.warning(self, "导出失败", f"导出任务摘要失败：{e}")
+        self.result_detail_widget.export_detection_detail(fmt)
+
+    def _history_task_type_label(self) -> str:
+        if hasattr(self, "tab_widget") and self.tab_widget.currentIndex() == 2:
+            return "设备监控"
+        st = getattr(self, "current_source_type", "") or ""
+        return {
+            "image": "实时 · 图片",
+            "video": "实时 · 视频",
+            "camera": "实时 · 摄像头",
+        }.get(st, st or "实时检测")
+
+    def _history_source_summary(self) -> str:
+        if not hasattr(self, "current_file_label"):
+            return "-"
+        t = (self.current_file_label.toolTip() or "").strip() or (
+            self.current_file_label.text() or "").strip()
+        if len(t) > 96:
+            return t[:44] + "…" + t[-44:]
+        return t or "-"
+
+    def _update_history_snapshot(self, results, class_names, inference_time):
+        """更新「实时任务」结束时写入历史表用的快照（每帧覆盖，停止时落盘一条）。"""
+        object_count = 0
+        note = ""
+        if results and results[0].boxes is not None and len(results[0].boxes) > 0:
+            object_count = len(results[0].boxes)
+            classes = results[0].boxes.cls.cpu().numpy().astype(int)
+            class_counts = {}
+            for cls in classes:
+                cname = class_names[cls] if cls < len(
+                    class_names) else f"类别{cls}"
+                class_counts[cname] = class_counts.get(cname, 0) + 1
+            note = ", ".join(
+                [f"{n}:{c}" for n, c in class_counts.items()])
+        model = self.model_combo.currentText() if hasattr(
+            self, "model_combo") else "-"
+        self._history_last_snapshot = {
+            "time_str": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "task_type": self._history_task_type_label(),
+            "source": self._history_source_summary(),
+            "model": model,
+            "objects": object_count,
+            "inference_s": float(inference_time),
+            "note": note[:160],
+        }
+
+    def _flush_history_task_snapshot(self):
+        """将最近一次实时检测快照写入历史表（批量模式不写）。"""
+        if getattr(self, "_history_batch_mode", False):
+            return
+        snap = getattr(self, "_history_last_snapshot", None)
+        if not snap or not hasattr(self, "task_history_widget"):
+            return
+        self.task_history_widget.add_record(**snap)
+        self._history_last_snapshot = None
 
     def _build_main_workspace(self):
         """左 — Tab 与运行按钮/任务进度同一行（角标），无「检测画布/运行控制」标题；右 — 配置侧栏。"""
@@ -4089,6 +4727,7 @@ class EnhancedDetectionUI(QMainWindow):
         self.tab_widget = QTabWidget()
         mtb = self.tab_widget.tabBar()
         mtb.setObjectName("mainTabBar")
+        mtb.setElideMode(Qt.TextElideMode.ElideNone)
         mtb.show()
 
         realtime_tab = self.create_realtime_tab()
@@ -4123,7 +4762,7 @@ class EnhancedDetectionUI(QMainWindow):
         row = QWidget()
         rh = QHBoxLayout(row)
         rh.setContentsMargins(0, 0, 0, 0)
-        rh.setSpacing(20)
+        rh.setSpacing(0)
         rh.addWidget(left_col, 16)
         rh.addWidget(right, 7)
         return row
@@ -4300,6 +4939,7 @@ class EnhancedDetectionUI(QMainWindow):
         """加载模型"""
         try:
             self.model = YOLO(model_path)
+            self._loaded_model_path = str(Path(model_path).resolve())
             self.log_message(f"模型加载成功: {Path(model_path).name}")
             # self.update_button_states()
             self._update_header_pills()
@@ -4307,6 +4947,7 @@ class EnhancedDetectionUI(QMainWindow):
         except Exception as e:
             self.log_message(f"模型加载失败: {str(e)}")
             self.model = None
+            self._loaded_model_path = ""
             self._update_header_pills()
             return False
 
@@ -4443,12 +5084,16 @@ class EnhancedDetectionUI(QMainWindow):
 
     def _collect_current_task_config(self):
         """收集当前任务配置"""
+        save_txt = ""
+        if hasattr(self, "save_dir_edit"):
+            save_txt = self.save_dir_edit.text().strip()
+        save_dir = save_txt or self.default_save_dir
         return {
             "model_name": self.model_combo.currentText(),
             "confidence_threshold": float(self.confidence_threshold),
             "source_type": self.current_source_type,
             "source_path": self.current_source_path,
-            "save_dir": self.default_save_dir,
+            "save_dir": save_dir,
             "camera_id": self.camera_combo.currentData()
         }
 
@@ -4605,16 +5250,30 @@ class EnhancedDetectionUI(QMainWindow):
             self.source_combo.setCurrentIndex(source_index)
 
         source_path = config.get("source_path")
-        if source_path:
+        if self.current_source_type == "camera":
+            pass
+        elif source_path:
             path_obj = Path(source_path)
             if path_obj.exists():
-                self.current_source_path = source_path
-                self._current_file_full_path = source_path
+                resolved = str(path_obj.resolve())
+                self.current_source_path = resolved
+                self._current_file_full_path = resolved
                 self._update_current_file_display()
                 if self.current_source_type in ["image", "video"]:
-                    self.preview_file(source_path)
+                    self.preview_file(resolved)
             else:
-                self.log_message(f"预设源路径不存在: {source_path}")
+                self.current_source_path = None
+                self._current_file_full_path = None
+                self._update_current_file_display()
+                self.log_message(f"预设中的源路径已不存在，已清空: {source_path}")
+        else:
+            if self.current_source_type in ("image", "video", "batch"):
+                self.current_source_path = None
+                self._current_file_full_path = None
+                self._update_current_file_display()
+                self.log_message(
+                    "提示：该预设未保存输入文件/目录路径；请先在右侧选好路径后点击「修改预设」保存到预设。"
+                )
 
         save_dir = config.get("save_dir")
         if save_dir:
@@ -4746,6 +5405,8 @@ class EnhancedDetectionUI(QMainWindow):
             if not camera_ids:
                 self.log_message("错误: 请在右侧输入源选择可用摄像头")
                 return
+            self._history_last_snapshot = None
+            self._history_batch_mode = False
             self.monitor_tab.set_shared_model(self.model)
             self.monitor_tab.start_monitoring(
                 shared_model=self.model, camera_ids=camera_ids)
@@ -4765,6 +5426,8 @@ class EnhancedDetectionUI(QMainWindow):
 
     def start_single_detection(self):
         """开始单个检测"""
+        self._history_last_snapshot = None
+        self._history_batch_mode = False
         camera_id = 0
         if self.current_source_type == "camera":
             camera_id = self.camera_combo.currentData()
@@ -4792,6 +5455,8 @@ class EnhancedDetectionUI(QMainWindow):
 
     def start_batch_detection(self):
         """开始批量检测"""
+        self._history_last_snapshot = None
+        self._history_batch_mode = True
         self.batch_results.clear()
 
         self.batch_detection_thread = BatchDetectionThread(
@@ -4906,6 +5571,9 @@ class EnhancedDetectionUI(QMainWindow):
             self._status_objects.setText("0")
             self._status_latency.setText(f"{inference_time*1000:.0f} 毫秒")
 
+        self._update_history_snapshot(
+            results, class_names, inference_time)
+
     def _on_fps_updated(self, fps):
         try:
             self._status_fps.setText(f"{fps:.1f}")
@@ -4953,6 +5621,24 @@ class EnhancedDetectionUI(QMainWindow):
         total_objects = sum(result['object_count']
                             for result in self.batch_results)
 
+        if hasattr(self, "task_history_widget") and total_count > 0:
+            sum_inf = sum(float(r["inference_time"])
+                          for r in self.batch_results)
+            avg_inf = sum_inf / total_count
+            src = (self.current_source_path or "").strip() or "-"
+            if len(src) > 96:
+                src = src[:44] + "…" + src[-44:]
+            self.task_history_widget.add_record(
+                time_str=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                task_type="批量分析",
+                source=src,
+                model=self.model_combo.currentText() if hasattr(
+                    self, "model_combo") else "-",
+                objects=total_objects,
+                inference_s=round(sum_inf, 4),
+                note=f"共 {total_count} 张 · 均 {avg_inf:.4f}s/张",
+            )
+
         self.log_message(
             f"批量检测完成：共 {total_count} 张图片，检出 {total_objects} 个目标")
         self.statusBar().showMessage(
@@ -4962,9 +5648,14 @@ class EnhancedDetectionUI(QMainWindow):
         self.clear_results_btn.setEnabled(True)
         self.result_index_label.setText(f"1/{len(self.batch_results)}")
         self.on_detection_finished(completed=True)
+        self._history_batch_mode = False
 
     def on_detection_finished(self, completed=False):
         """检测完成回调"""
+        try:
+            self._flush_history_task_snapshot()
+        except Exception:
+            pass
         if completed or self.progress_bar.value() >= 100:
             self.progress_bar.setValue(100)
             self._set_progress_state("done")
@@ -4974,6 +5665,9 @@ class EnhancedDetectionUI(QMainWindow):
         self.update_detection_ui_state(False)
         self.pause_btn.setText("暂停")
         self._set_btn_icon(self.pause_btn, "pause", "#6366f1")
+        bt = getattr(self, "batch_detection_thread", None)
+        if bt is None or not getattr(bt, "is_running", False):
+            self._history_batch_mode = False
 
     def show_batch_result(self, index):
         """显示批量结果"""
