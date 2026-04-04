@@ -4431,6 +4431,16 @@ class EnhancedDetectionUI(QMainWindow):
         _export_menu.triggered.connect(self._on_export_detail_format)
         self.export_detail_btn.setEnabled(False)
         ov_btns.addWidget(self.export_detail_btn, 1)
+        _eq_w = max(
+            self.open_result_dir_btn.sizeHint().width(),
+            self.export_detail_btn.sizeHint().width(),
+        )
+        self.open_result_dir_btn.setMinimumWidth(_eq_w)
+        self.export_detail_btn.setMinimumWidth(_eq_w)
+        self.open_result_dir_btn.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.export_detail_btn.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         ob.addLayout(ov_btns)
 
         ov.addWidget(overview_body)
