@@ -26,6 +26,7 @@ else:
     base_dir = Path(__file__).parent
 
 from theme_icons import ThemeIcons
+from task_history_store import TaskHistoryStore
 
 
 class BatchDetectionThread(QThread):
@@ -1291,15 +1292,106 @@ _DETECTION_EXPORT_DETAIL_FIELDS = [
 ]
 
 
+class TaskHistoryPrefsDialog(QDialog):
+    """历史任务首选项：条数上限、清空全部、存储说明。"""
+
+    def __init__(
+        self,
+        parent,
+        base_dir: Path,
+        initial_max: int,
+        on_purged=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("历史任务 — 首选项")
+        self.setModal(True)
+        self._base_dir = Path(base_dir)
+        self._db_path = self._base_dir / "task_history.db"
+        self._on_purged = on_purged
+
+        root = QVBoxLayout(self)
+        form = QFormLayout()
+        self._max_spin = QSpinBox()
+        self._max_spin.setRange(50, 20_000)
+        self._max_spin.setValue(initial_max)
+        self._max_spin.setSuffix(" 条")
+        form.addRow("最多保留（超出则从最旧删除）：", self._max_spin)
+
+        lab_db = QLabel(str(self._db_path.resolve()))
+        lab_db.setWordWrap(True)
+        lab_db.setObjectName("wfMutedHint")
+        form.addRow("本地库文件：", lab_db)
+
+        hint = QLabel(
+            "单机使用默认采用内置 SQLite 文件，无需启动数据库服务，备份时复制上述文件即可。\n\n"
+            "若需多机共享、与现有业务库统一，可再接入 MySQL（需单独开发连接配置与表结构迁移）。"
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("wfMutedHint")
+        form.addRow("存储说明：", hint)
+        root.addLayout(form)
+
+        purge_btn = QPushButton("清空全部历史记录…")
+        purge_btn.clicked.connect(self._on_purge_all)
+        root.addWidget(purge_btn)
+
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        root.addWidget(bb)
+
+    def _on_purge_all(self):
+        ret = QMessageBox.question(
+            self,
+            "确认",
+            "将删除所有历史记录且不可恢复，是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        TaskHistoryStore(self._db_path).delete_all()
+        if callable(self._on_purged):
+            self._on_purged()
+        QMessageBox.information(self, "完成", "已清空全部历史记录。")
+
+    def max_records(self) -> int:
+        return self._max_spin.value()
+
+
 class TaskHistoryWidget(QWidget):
-    """底部「历史任务」：表格记录近期任务摘要。"""
+    """底部「历史任务」：SQLite 持久化，支持多选删除与首选项。"""
 
-    _COLS = ["时间", "任务类型", "来源", "模型", "目标数", "耗时(s)", "备注"]
-    MAX_ROWS = 200
+    _HEADERS = ["", "时间", "任务类型", "来源", "模型", "目标数", "耗时(s)", "备注", "操作"]
 
-    def __init__(self):
+    def __init__(self, base_dir: Path):
         super().__init__()
+        self._base_dir = Path(base_dir)
+        self._prefs_path = self._base_dir / "task_history_prefs.json"
+        self._store = TaskHistoryStore(self._base_dir / "task_history.db")
+        self._prefs = self._load_prefs()
         self._build_ui()
+        self._reload_from_store()
+
+    def _load_prefs(self) -> dict:
+        d = {"max_records": 500}
+        if self._prefs_path.exists():
+            try:
+                d.update(json.loads(
+                    self._prefs_path.read_text(encoding="utf-8")))
+            except Exception:
+                pass
+        return d
+
+    def _save_prefs(self) -> None:
+        self._prefs_path.write_text(
+            json.dumps(self._prefs, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _max_records(self) -> int:
+        return int(self._prefs.get("max_records", 500))
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -1308,33 +1400,73 @@ class TaskHistoryWidget(QWidget):
         bar = QHBoxLayout()
         bar.setContentsMargins(8, 4, 8, 0)
         bar.setSpacing(8)
+
+        self.prefs_btn = QPushButton("首选项")
+        self.prefs_btn.setObjectName("toolBtn")
+        self.prefs_btn.setIcon(ThemeIcons.icon("settings", 16, "#6366f1"))
+        self.prefs_btn.setIconSize(QSize(16, 16))
+        self.prefs_btn.setMinimumHeight(32)
+        self.prefs_btn.clicked.connect(self._on_prefs)
+        bar.addWidget(self.prefs_btn, 0)
+
+        self.sel_all_btn = QPushButton("全选")
+        self.sel_all_btn.setObjectName("toolBtn")
+        self.sel_all_btn.setMinimumHeight(32)
+        self.sel_all_btn.clicked.connect(self._select_all)
+        bar.addWidget(self.sel_all_btn, 0)
+
+        self.sel_none_btn = QPushButton("取消全选")
+        self.sel_none_btn.setObjectName("toolBtn")
+        self.sel_none_btn.setMinimumHeight(32)
+        self.sel_none_btn.clicked.connect(self._select_none)
+        bar.addWidget(self.sel_none_btn, 0)
+
+        self.del_sel_btn = QPushButton("删除所选")
+        self.del_sel_btn.setObjectName("toolBtn")
+        self.del_sel_btn.setIcon(ThemeIcons.icon("trash", 16, "#6366f1"))
+        self.del_sel_btn.setIconSize(QSize(16, 16))
+        self.del_sel_btn.setMinimumHeight(32)
+        self.del_sel_btn.clicked.connect(self._delete_selected)
+        bar.addWidget(self.del_sel_btn, 0)
+
         bar.addStretch(1)
-        self.clear_btn = QPushButton("清空历史")
-        self.clear_btn.setObjectName("toolBtn")
-        self.clear_btn.setIcon(ThemeIcons.icon("eraser", 16, "#6366f1"))
-        self.clear_btn.setIconSize(QSize(16, 16))
-        self.clear_btn.setMinimumHeight(32)
-        self.clear_btn.clicked.connect(self._on_clear)
-        bar.addWidget(self.clear_btn, 0, Qt.AlignTop)
         layout.addLayout(bar)
 
-        self.table = QTableWidget(0, len(self._COLS))
+        ncol = len(self._HEADERS)
+        self.table = QTableWidget(0, ncol)
         self.table.setObjectName("wfHistoryTable")
-        self.table.setHorizontalHeaderLabels(self._COLS)
+        self.table.setHorizontalHeaderLabels(self._HEADERS)
+        for hi in range(ncol):
+            item = self.table.horizontalHeaderItem(hi)
+            if item:
+                if hi == 0:
+                    item.setTextAlignment(
+                        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+                else:
+                    item.setTextAlignment(
+                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection)
+            QAbstractItemView.SelectionMode.NoSelection)
         self.table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setMinimumHeight(160)
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
         _hh = self.table.horizontalHeader()
-        for i in range(6):
-            _hh.setSectionResizeMode(
-                i, QHeaderView.ResizeMode.ResizeToContents)
-        _hh.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+        _hh.setStretchLastSection(False)
+        _hh.setMinimumSectionSize(72)
+        _hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(0, 40)
+        for col in range(1, 9):
+            _hh.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
+        _vh = self.table.verticalHeader()
+        _vh.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        _vh.setDefaultSectionSize(42)
+        _vh.setMinimumSectionSize(38)
         self.table.setItemDelegate(NoFocusTableItemDelegate(self.table))
         self.table.setSizePolicy(
             QSizePolicy.Policy.Expanding,
@@ -1342,8 +1474,132 @@ class TaskHistoryWidget(QWidget):
         )
         layout.addWidget(self.table, 1)
 
-    def _on_clear(self):
+    def _on_prefs(self):
+        dlg = TaskHistoryPrefsDialog(
+            self.window(),
+            self._base_dir,
+            self._max_records(),
+            on_purged=self._reload_from_store,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self._prefs["max_records"] = dlg.max_records()
+        self._save_prefs()
+        self._store.prune_to_limit(self._max_records())
+        self._reload_from_store()
+        win = self.window()
+        if hasattr(win, "log_message"):
+            win.log_message("历史任务首选项已保存。")
+
+    def _select_all(self):
+        for r in range(self.table.rowCount()):
+            it = self.table.item(r, 0)
+            if it:
+                it.setCheckState(Qt.CheckState.Checked)
+
+    def _select_none(self):
+        for r in range(self.table.rowCount()):
+            it = self.table.item(r, 0)
+            if it:
+                it.setCheckState(Qt.CheckState.Unchecked)
+
+    def _delete_selected(self):
+        ids = []
+        for r in range(self.table.rowCount()):
+            it = self.table.item(r, 0)
+            if it and it.checkState() == Qt.CheckState.Checked:
+                rid = it.data(Qt.ItemDataRole.UserRole)
+                if rid is not None:
+                    ids.append(int(rid))
+        if not ids:
+            QMessageBox.information(self.window(), "提示", "请先勾选要删除的记录。")
+            return
+        ret = QMessageBox.question(
+            self.window(),
+            "确认删除",
+            f"确定删除选中的 {len(ids)} 条历史记录？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret == QMessageBox.StandardButton.Yes:
+            self._delete_ids(ids)
+
+    def _delete_ids(self, ids: list):
+        if not ids:
+            return
+        self._store.delete_ids(ids)
+        self._reload_from_store()
+
+    def _delete_one(self, row_id: int):
+        ret = QMessageBox.question(
+            self.window(),
+            "确认删除",
+            "确定删除这一条历史记录？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret == QMessageBox.StandardButton.Yes:
+            self._delete_ids([row_id])
+
+    def _reload_from_store(self):
+        if not hasattr(self, "table"):
+            return
+        self.table.blockSignals(True)
+        self.table.clearContents()
         self.table.setRowCount(0)
+        for row in self._store.list_recent(self._max_records()):
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            self._fill_row(r, row)
+        self.table.blockSignals(False)
+
+    def _fill_row(self, table_row: int, row: tuple):
+        (
+            nid,
+            time_str,
+            task_type,
+            source,
+            model,
+            objects,
+            inference_s,
+            note,
+        ) = row
+        ch = QTableWidgetItem()
+        ch.setFlags(
+            Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+        ch.setCheckState(Qt.CheckState.Unchecked)
+        ch.setData(Qt.ItemDataRole.UserRole, int(nid))
+        self.table.setItem(table_row, 0, ch)
+        vals = [
+            time_str,
+            task_type or "",
+            source or "",
+            model or "",
+            str(objects),
+            f"{float(inference_s):.4f}",
+            note or "",
+        ]
+        align_lv = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        for c, text in enumerate(vals, start=1):
+            it = QTableWidgetItem(text)
+            it.setTextAlignment(align_lv)
+            self.table.setItem(table_row, c, it)
+        wrap = QWidget()
+        hl = QHBoxLayout(wrap)
+        hl.setContentsMargins(4, 4, 8, 4)
+        hl.setSpacing(0)
+        one = QPushButton("删除")
+        one.setObjectName("toolBtn")
+        one.setFixedHeight(28)
+        one.setMinimumWidth(56)
+        rid = int(nid)
+        one.clicked.connect(lambda _=False, i=rid: self._delete_one(i))
+        hl.addWidget(one, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        wrap.setMinimumHeight(36)
+        self.table.setCellWidget(table_row, 8, wrap)
+        self.table.resizeRowToContents(table_row)
+        self.table.setRowHeight(
+            table_row, max(self.table.rowHeight(table_row), 40))
 
     def add_record(
         self,
@@ -1355,24 +1611,17 @@ class TaskHistoryWidget(QWidget):
         inference_s: float,
         note: str = "",
     ):
-        while self.table.rowCount() >= self.MAX_ROWS:
-            self.table.removeRow(self.table.rowCount() - 1)
-        self.table.insertRow(0)
-        vals = [
+        self._store.add(
             time_str,
             task_type,
             source,
             model,
-            str(objects),
-            f"{inference_s:.4f}",
+            objects,
+            inference_s,
             note,
-        ]
-        for c, text in enumerate(vals):
-            it = QTableWidgetItem(text)
-            it.setTextAlignment(Qt.AlignCenter)
-            if c in (2, 6):
-                it.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            self.table.setItem(0, c, it)
+        )
+        self._store.prune_to_limit(self._max_records())
+        self._reload_from_store()
 
 
 class NoFocusTableItemDelegate(QStyledItemDelegate):
@@ -1382,6 +1631,7 @@ class NoFocusTableItemDelegate(QStyledItemDelegate):
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
         opt.state &= ~QStyle.StateFlag.State_HasFocus
+        opt.state &= ~QStyle.StateFlag.State_KeyboardFocusChange
         super().paint(painter, opt, index)
 
 
@@ -2661,7 +2911,7 @@ class StyleManager:
                 alternate-background-color: #f8fafc;
             }
             QTableWidget#wfHistoryTable::item {
-                padding: 6px 8px;
+                padding: 6px 10px;
                 border: none;
                 outline: none;
             }
@@ -2758,6 +3008,10 @@ class StyleManager:
                 font-size: 13px;
                 border-radius: 18px;
                 padding: 28px;
+            }
+            QLabel#previewPlaceholder:focus {
+                border: 2px dashed #cbd5e1;
+                outline: none;
             }
 
             QLabel#batchPreviewPlaceholder {
@@ -3721,8 +3975,6 @@ class EnhancedDetectionUI(QMainWindow):
         self.log_text.setFont(StyleManager.log_mono_font(10))
 
         self.bottom_drawer.addTab(self.result_detail_widget, "检测明细")
-        self.task_history_widget = TaskHistoryWidget()
-        self.bottom_drawer.addTab(self.task_history_widget, "历史任务")
         q_tab = QLabel("批处理队列与任务编排将显示在此处。")
         q_tab.setAlignment(Qt.AlignCenter)
         q_tab.setObjectName("wfPlaceholder")
@@ -3746,7 +3998,7 @@ class EnhancedDetectionUI(QMainWindow):
         self._update_current_file_display()
 
     def _on_main_tab_changed(self, index: int):
-        """仅「实时检测」显示底部检测明细/历史/队列；批量与设备监控占满主画布。"""
+        """仅「实时检测」显示底部检测明细/批处理队列；其它主 Tab 占满主画布。"""
         if hasattr(self, "bottom_drawer"):
             self.bottom_drawer.setVisible(index == 0)
         self._sync_source_options_for_tab(index)
@@ -3759,6 +4011,7 @@ class EnhancedDetectionUI(QMainWindow):
             0: ["单张图片", "视频文件", "摄像头"],  # 实时检测
             1: ["文件夹批量"],                  # 批量分析
             2: ["摄像头"],                      # 设备监控
+            3: ["单张图片", "视频文件", "摄像头"],  # 历史任务（与实时一致，避免侧栏状态错乱）
         }
         allowed = tab_source_map.get(tab_index, ["单张图片", "视频文件", "摄像头"])
         previous = self.source_combo.currentText()
@@ -4750,6 +5003,12 @@ class EnhancedDetectionUI(QMainWindow):
             batch_tab, ThemeIcons.icon("folders", 17, "#0ea5e9"), "批量分析")
         self.tab_widget.addTab(
             self.monitor_tab, ThemeIcons.icon("monitor", 17, "#0ea5e9"), "设备监控")
+        self.task_history_widget = TaskHistoryWidget(base_dir)
+        self.tab_widget.addTab(
+            self.task_history_widget,
+            ThemeIcons.icon("list", 17, "#0ea5e9"),
+            "历史任务",
+        )
 
         canvas = QFrame()
         canvas.setObjectName("wireframeCanvasCard")
@@ -4806,6 +5065,9 @@ class EnhancedDetectionUI(QMainWindow):
         self.original_label.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.original_label.setScaledContents(False)
+        self.original_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.original_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.NoTextInteraction)
         original_layout.addWidget(self.original_label, 1)
 
         # 结果图显示
@@ -4826,6 +5088,9 @@ class EnhancedDetectionUI(QMainWindow):
         self.result_label.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.result_label.setScaledContents(False)
+        self.result_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.result_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.NoTextInteraction)
         result_layout.addWidget(self.result_label, 1)
 
         image_row.addWidget(original_container, 1)
