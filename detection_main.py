@@ -1292,6 +1292,65 @@ _DETECTION_EXPORT_DETAIL_FIELDS = [
 ]
 
 
+def _confirm_dialog(parent, title: str, text: str, ok_text: str = "确认删除", cancel_text: str = "取消") -> bool:
+    """统一确认弹窗样式与文案，避免系统默认 Yes/No 风格突兀。"""
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setWindowTitle(title)
+    box.setText(text)
+    box.setStandardButtons(
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+    yes_btn = box.button(QMessageBox.StandardButton.Yes)
+    no_btn = box.button(QMessageBox.StandardButton.No)
+    if yes_btn is not None:
+        yes_btn.setText(ok_text)
+    if no_btn is not None:
+        no_btn.setText(cancel_text)
+    box.setDefaultButton(QMessageBox.StandardButton.No)
+    box.setEscapeButton(QMessageBox.StandardButton.No)
+    box.setStyleSheet(
+        """
+        QMessageBox {
+            background: #f8fafc;
+        }
+        QMessageBox QLabel {
+            color: #0f172a;
+            font-size: 13px;
+            min-width: 0px;
+            padding: 0px;
+            margin: 0px;
+        }
+        QMessageBox QPushButton {
+            min-width: 72px;
+            min-height: 30px;
+            padding: 4px 10px;
+            border-radius: 8px;
+            border: 1px solid #cbd5e1;
+            background: #ffffff;
+            color: #334155;
+            font-weight: 600;
+        }
+        QMessageBox QPushButton:hover {
+            background: #f1f5f9;
+            border-color: #94a3b8;
+        }
+        QMessageBox QPushButton:pressed {
+            background: #e2e8f0;
+        }
+        """
+    )
+    return box.exec() == QMessageBox.StandardButton.Yes
+
+
+class PathCellLineEdit(QLineEdit):
+    """历史来源路径单元格：可横向查看，失焦后恢复初始展示。"""
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self.deselect()
+        self.setCursorPosition(0)
+
+
 class TaskHistoryPrefsDialog(QDialog):
     """历史任务首选项：条数上限、清空全部、存储说明。"""
 
@@ -1342,14 +1401,14 @@ class TaskHistoryPrefsDialog(QDialog):
         root.addWidget(bb)
 
     def _on_purge_all(self):
-        ret = QMessageBox.question(
+        ok = _confirm_dialog(
             self,
-            "确认",
+            "确认清空",
             "将删除所有历史记录且不可恢复，是否继续？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            ok_text="确认清空",
+            cancel_text="取消",
         )
-        if ret != QMessageBox.StandardButton.Yes:
+        if not ok:
             return
         TaskHistoryStore(self._db_path).delete_all()
         if callable(self._on_purged):
@@ -1363,7 +1422,8 @@ class TaskHistoryPrefsDialog(QDialog):
 class TaskHistoryWidget(QWidget):
     """底部「历史任务」：SQLite 持久化，支持多选删除与首选项。"""
 
-    _HEADERS = ["", "时间", "任务类型", "来源", "模型", "目标数", "耗时(s)", "备注", "操作"]
+    _HEADERS = ["", "时间", "任务类型", "模型", "目标数", "耗时(s)", "备注", "来源"]
+    _SOURCE_COL = 7
 
     def __init__(self, base_dir: Path):
         super().__init__()
@@ -1421,7 +1481,7 @@ class TaskHistoryWidget(QWidget):
         self.sel_none_btn.clicked.connect(self._select_none)
         bar.addWidget(self.sel_none_btn, 0)
 
-        self.del_sel_btn = QPushButton("删除所选")
+        self.del_sel_btn = QPushButton("批量删除")
         self.del_sel_btn.setObjectName("toolBtn")
         self.del_sel_btn.setIcon(ThemeIcons.icon("trash", 16, "#6366f1"))
         self.del_sel_btn.setIconSize(QSize(16, 16))
@@ -1439,18 +1499,14 @@ class TaskHistoryWidget(QWidget):
         for hi in range(ncol):
             item = self.table.horizontalHeaderItem(hi)
             if item:
-                if hi == 0:
-                    item.setTextAlignment(
-                        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
-                else:
-                    item.setTextAlignment(
-                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(
-            QAbstractItemView.SelectionMode.NoSelection)
+            QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setMinimumHeight(160)
@@ -1461,7 +1517,7 @@ class TaskHistoryWidget(QWidget):
         _hh.setMinimumSectionSize(72)
         _hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.table.setColumnWidth(0, 40)
-        for col in range(1, 9):
+        for col in range(1, ncol):
             _hh.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
         _vh = self.table.verticalHeader()
         _vh.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
@@ -1514,14 +1570,14 @@ class TaskHistoryWidget(QWidget):
         if not ids:
             QMessageBox.information(self.window(), "提示", "请先勾选要删除的记录。")
             return
-        ret = QMessageBox.question(
+        ok = _confirm_dialog(
             self.window(),
             "确认删除",
             f"确定删除选中的 {len(ids)} 条历史记录？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            ok_text="确认删除",
+            cancel_text="取消",
         )
-        if ret == QMessageBox.StandardButton.Yes:
+        if ok:
             self._delete_ids(ids)
 
     def _delete_ids(self, ids: list):
@@ -1529,17 +1585,6 @@ class TaskHistoryWidget(QWidget):
             return
         self._store.delete_ids(ids)
         self._reload_from_store()
-
-    def _delete_one(self, row_id: int):
-        ret = QMessageBox.question(
-            self.window(),
-            "确认删除",
-            "确定删除这一条历史记录？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if ret == QMessageBox.StandardButton.Yes:
-            self._delete_ids([row_id])
 
     def _reload_from_store(self):
         if not hasattr(self, "table"):
@@ -1573,33 +1618,30 @@ class TaskHistoryWidget(QWidget):
         vals = [
             time_str,
             task_type or "",
-            source or "",
             model or "",
             str(objects),
             f"{float(inference_s):.4f}",
             note or "",
+            source or "",
         ]
-        align_lv = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        align_cv = Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
         for c, text in enumerate(vals, start=1):
+            if c == self._SOURCE_COL:
+                # 来源列用只读输入框承载长路径：可点选/拖拽选中并左右移动查看全路径
+                src_edit = PathCellLineEdit(text)
+                src_edit.setObjectName("historyPathCellEdit")
+                src_edit.setReadOnly(True)
+                src_edit.setFrame(False)
+                src_edit.setCursorPosition(0)
+                src_edit.setFont(self.table.font())
+                src_edit.setAlignment(
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                src_edit.setToolTip(text)
+                self.table.setCellWidget(table_row, c, src_edit)
+                continue
             it = QTableWidgetItem(text)
-            it.setTextAlignment(align_lv)
+            it.setTextAlignment(align_cv)
             self.table.setItem(table_row, c, it)
-        wrap = QWidget()
-        hl = QHBoxLayout(wrap)
-        hl.setContentsMargins(4, 4, 8, 4)
-        hl.setSpacing(0)
-        one = QPushButton("删除")
-        one.setObjectName("toolBtn")
-        one.setFixedHeight(28)
-        one.setMinimumWidth(56)
-        rid = int(nid)
-        one.clicked.connect(lambda _=False, i=rid: self._delete_one(i))
-        hl.addWidget(one, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        wrap.setMinimumHeight(36)
-        self.table.setCellWidget(table_row, 8, wrap)
-        self.table.resizeRowToContents(table_row)
-        self.table.setRowHeight(
-            table_row, max(self.table.rowHeight(table_row), 40))
 
     def add_record(
         self,
@@ -2936,6 +2978,18 @@ class StyleManager:
                 border-right: 1px solid #e2e8f0;
                 border-bottom: 1px solid #e2e8f0;
             }
+            QLineEdit#historyPathCellEdit {
+                min-height: 0px;
+                padding: 0px 6px;
+                border: none;
+                background: transparent;
+                color: #0f172a;
+                font-size: 13px;
+            }
+            QLineEdit#historyPathCellEdit:focus {
+                border: none;
+                background: transparent;
+            }
 
             QFrame#headerPill {
                 background: rgba(255, 255, 255, 0.1);
@@ -3150,34 +3204,34 @@ class StyleManager:
                 color: #94a3b8;
             }
 
-            /* 任务概览：导出检测明细 — 下拉箭头紧跟文案右侧垂直居中，与侧栏次要按钮同系 */
-            QToolButton#exportDetailMenuBtn {
+            /* 任务概览：导出检测明细 — 使用 QPushButton 保证图标+文字居中 */
+            QPushButton#exportDetailMenuBtn {
                 background: #ffffff;
                 border: 1px solid #e2e8f0;
                 color: #475569;
-                padding: 6px 12px 6px 12px;
-                padding-right: 26px;
+                padding: 6px 10px;
                 font-size: 12px;
                 font-weight: 600;
                 border-radius: 10px;
                 min-height: 32px;
+                text-align: center;
             }
-            QToolButton#exportDetailMenuBtn:hover {
+            QPushButton#exportDetailMenuBtn:hover {
                 background: #f8fafc;
                 border-color: #c7d2fe;
                 color: #312e81;
             }
-            QToolButton#exportDetailMenuBtn:pressed {
+            QPushButton#exportDetailMenuBtn:pressed {
                 background: #eef2ff;
             }
-            QToolButton#exportDetailMenuBtn:disabled {
+            QPushButton#exportDetailMenuBtn:disabled {
                 background: #e2e8f0;
                 color: #94a3b8;
             }
-            QToolButton#exportDetailMenuBtn::menu-indicator {
+            QPushButton#exportDetailMenuBtn::menu-indicator {
                 subcontrol-origin: padding;
                 subcontrol-position: right center;
-                width: 12px;
+                width: 10px;
                 height: 10px;
                 margin-right: 6px;
             }
@@ -3235,7 +3289,6 @@ class StyleManager:
             QPushButton#toolBtn:pressed {
                 background: #eef2ff;
             }
-
             QFrame#runControlPanel,
             QFrame#presetActionPanel {
                 background: #ffffff;
@@ -4656,16 +4709,13 @@ class EnhancedDetectionUI(QMainWindow):
         self.open_result_dir_btn.setMinimumHeight(34)
         self.open_result_dir_btn.clicked.connect(self._open_output_dir)
         ov_btns.addWidget(self.open_result_dir_btn, 1)
-        self.export_detail_btn = QToolButton()
+        self.export_detail_btn = QPushButton()
         self.export_detail_btn.setObjectName("exportDetailMenuBtn")
         self.export_detail_btn.setText("导出检测明细")
         self.export_detail_btn.setIcon(
-            ThemeIcons.icon_same_when_disabled("download", 18, "#6366f1"))
-        self.export_detail_btn.setIconSize(QSize(18, 18))
-        self.export_detail_btn.setToolButtonStyle(
-            Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.export_detail_btn.setPopupMode(
-            QToolButton.ToolButtonPopupMode.InstantPopup)
+            ThemeIcons.icon_same_when_disabled("download", 16, "#6366f1"))
+        self.export_detail_btn.setIconSize(QSize(16, 16))
+        self.export_detail_btn.setProperty("variant", "secondary")
         self.export_detail_btn.setMinimumHeight(34)
         self.export_detail_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.export_detail_btn.setToolTip(
