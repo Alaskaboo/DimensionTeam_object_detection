@@ -861,38 +861,31 @@ class ModelSelectionDialog(QDialog):
             # 操作列
             self._create_official_operation_buttons(row, model)
 
-    def _create_operation_buttons(self, row, model):
-        """创建操作按钮"""
+    def _build_model_download_url(self, model_name, official=False):
+        if official:
+            return f"https://github.com/ultralytics/assets/releases/download/v8.4.0/{model_name}"
+        return f"https://github.com/JingW-ui/PI-MAPP/releases/download/pt_download/{model_name}"
+
+    def _create_model_operation_buttons(self, row, model, table, download_path_edit, download_handler, copy_handler):
         widget = QWidget()
         layout = QHBoxLayout(widget)
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(4)
 
-        # 下载按钮
         download_btn = QPushButton("下载")
         download_btn.setIcon(ThemeIcons.icon("download", 14, "#ffffff"))
         download_btn.setIconSize(QSize(14, 14))
         download_btn.setFixedSize(76, 30)
-        # 使用partial解决闭包问题
-        download_btn.clicked.connect(
-            functools.partial(self.download_network_model, row))
+        download_btn.clicked.connect(functools.partial(download_handler, row))
 
-        # 复制链接按钮
         copy_btn = QPushButton("复制")
         copy_btn.setIcon(ThemeIcons.icon("link", 14, "#ffffff"))
         copy_btn.setIconSize(QSize(14, 14))
         copy_btn.setFixedSize(76, 30)
-        # 使用partial解决闭包问题
-        copy_btn.clicked.connect(functools.partial(
-            self.copy_download_link, model))
+        copy_btn.clicked.connect(functools.partial(copy_handler, model))
 
-        # 检查是否已下载
-        download_path = Path(self.download_path_edit.text())
-
-        local_path = download_path / model['文件名']
-        is_downloaded = local_path.exists()
-
-        if is_downloaded:
+        local_path = Path(download_path_edit.text()) / model['文件名']
+        if local_path.exists():
             download_btn.setText("已下载")
             download_btn.setIcon(QIcon())
             download_btn.setEnabled(False)
@@ -900,127 +893,69 @@ class ModelSelectionDialog(QDialog):
         layout.addWidget(download_btn)
         layout.addWidget(copy_btn)
         layout.addStretch()
+        table.setCellWidget(row, self.ACTION_COL, widget)
 
-        self.network_table.setCellWidget(row, self.ACTION_COL, widget)
+    def _create_operation_buttons(self, row, model):
+        """创建操作按钮"""
+        self._create_model_operation_buttons(
+            row, model, self.network_table, self.download_path_edit,
+            self.download_network_model, self.copy_download_link
+        )
 
     def _create_official_operation_buttons(self, row, model):
         """创建官方模型操作按钮"""
-        widget = QWidget()
-        layout = QHBoxLayout(widget)
-        layout.setContentsMargins(2, 2, 2, 2)
-        layout.setSpacing(4)
+        self._create_model_operation_buttons(
+            row, model, self.official_network_table, self.official_download_path_edit,
+            self.download_official_network_model, self.copy_official_download_link
+        )
 
-        # 下载按钮
-        download_btn = QPushButton("下载")
-        download_btn.setIcon(ThemeIcons.icon("download", 14, "#ffffff"))
-        download_btn.setIconSize(QSize(14, 14))
-        download_btn.setFixedSize(76, 30)
-        # 使用partial解决闭包问题
-        download_btn.clicked.connect(functools.partial(
-            self.download_official_network_model, row))
+    def _show_model_info_dialog(self, model, title):
+        try:
+            class_info = ast.literal_eval(model['类别信息'])
+            class_text = "\n".join(
+                [f"{k}: {v}" for k, v in class_info.items()])
+        except:
+            class_text = model['类别信息']
 
-        # 复制链接按钮
-        copy_btn = QPushButton("复制")
-        copy_btn.setIcon(ThemeIcons.icon("link", 14, "#ffffff"))
-        copy_btn.setIconSize(QSize(14, 14))
-        copy_btn.setFixedSize(76, 30)
-        # 使用partial解决闭包问题
-        copy_btn.clicked.connect(functools.partial(
-            self.copy_official_download_link, model))
+        info = (
+            f"模型名称: {model['文件名']}\n"
+            f"大小: {model['大小(MB)']} MB\n"
+            f"修改时间: {model['修改日期']}\n"
+            f"类别数量: {model['类别数量']}\n\n"
+            f"类别信息:\n{class_text}"
+        )
+        # 使用自定义对话框替代 QMessageBox，以支持最大高度与滚动显示
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg_layout = QVBoxLayout(dlg)
 
-        # 检查是否已下载
-        download_path = Path(self.official_download_path_edit.text())
-        local_path = download_path / model['文件名']
-        is_downloaded = local_path.exists()
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setPlainText(info)
+        text_edit.setMinimumWidth(480)
+        text_edit.setMaximumHeight(400)  # 最大高度，超过则显示滚动条
+        dlg_layout.addWidget(text_edit)
 
-        if is_downloaded:
-            download_btn.setText("已下载")
-            download_btn.setIcon(QIcon())
-            download_btn.setEnabled(False)
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok)
+        btn_box.accepted.connect(dlg.accept)
+        dlg_layout.addWidget(btn_box)
 
-        layout.addWidget(download_btn)
-        layout.addWidget(copy_btn)
-        layout.addStretch()
-
-        self.official_network_table.setCellWidget(row, self.ACTION_COL, widget)
+        dlg.exec()
 
     def show_network_model_info(self):
         """显示网络模型详细信息"""
         row = self.network_table.currentRow()
         if row < 0 or row >= len(self.network_models):
             return
-
-        model = self.network_models[row]
-        try:
-            class_info = ast.literal_eval(model['类别信息'])
-            class_text = "\n".join(
-                [f"{k}: {v}" for k, v in class_info.items()])
-        except:
-            class_text = model['类别信息']
-
-        info = (
-            f"模型名称: {model['文件名']}\n"
-            f"大小: {model['大小(MB)']} MB\n"
-            f"修改时间: {model['修改日期']}\n"
-            f"类别数量: {model['类别数量']}\n\n"
-            f"类别信息:\n{class_text}"
-        )
-        # 使用自定义对话框替代 QMessageBox，以支持最大高度与滚动显示
-        dlg = QDialog(self)
-        dlg.setWindowTitle("模型详细信息")
-        dlg_layout = QVBoxLayout(dlg)
-
-        text_edit = QTextEdit()
-        text_edit.setReadOnly(True)
-        text_edit.setPlainText(info)
-        text_edit.setMinimumWidth(480)
-        text_edit.setMaximumHeight(400)  # 最大高度，超过则显示滚动条
-        dlg_layout.addWidget(text_edit)
-
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok)
-        btn_box.accepted.connect(dlg.accept)
-        dlg_layout.addWidget(btn_box)
-
-        dlg.exec()
+        self._show_model_info_dialog(self.network_models[row], "模型详细信息")
 
     def show_official_network_model_info(self):
         """显示官方网络模型详细信息"""
         row = self.official_network_table.currentRow()
         if row < 0 or row >= len(self.official_network_models):
             return
-
-        model = self.official_network_models[row]
-        try:
-            class_info = ast.literal_eval(model['类别信息'])
-            class_text = "\n".join(
-                [f"{k}: {v}" for k, v in class_info.items()])
-        except:
-            class_text = model['类别信息']
-
-        info = (
-            f"模型名称: {model['文件名']}\n"
-            f"大小: {model['大小(MB)']} MB\n"
-            f"修改时间: {model['修改日期']}\n"
-            f"类别数量: {model['类别数量']}\n\n"
-            f"类别信息:\n{class_text}"
-        )
-        # 使用自定义对话框替代 QMessageBox，以支持最大高度与滚动显示
-        dlg = QDialog(self)
-        dlg.setWindowTitle("官方模型详细信息")
-        dlg_layout = QVBoxLayout(dlg)
-
-        text_edit = QTextEdit()
-        text_edit.setReadOnly(True)
-        text_edit.setPlainText(info)
-        text_edit.setMinimumWidth(480)
-        text_edit.setMaximumHeight(400)  # 最大高度，超过则显示滚动条
-        dlg_layout.addWidget(text_edit)
-
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok)
-        btn_box.accepted.connect(dlg.accept)
-        dlg_layout.addWidget(btn_box)
-
-        dlg.exec()
+        self._show_model_info_dialog(
+            self.official_network_models[row], "官方模型详细信息")
 
     def show_network_context_menu(self, pos):
         """显示网络模型右键菜单"""
@@ -1046,21 +981,18 @@ class ModelSelectionDialog(QDialog):
             lambda: self.download_official_network_model(row))
         menu.exec(self.official_network_table.viewport().mapToGlobal(pos))
 
-    def download_network_model(self, row):
-        """下载网络模型"""
-        if row >= len(self.network_models):
+    def _download_model_by_row(self, row, models, table, download_path_edit, download_done_text, official=False):
+        if row >= len(models):
             return
 
-        model = self.network_models[row]
+        model = models[row]
         model_name = model['文件名']
-        download_dir = Path(self.download_path_edit.text())
+        download_dir = Path(download_path_edit.text())
 
         try:
-            # 准备下载目录
             download_dir.mkdir(parents=True, exist_ok=True)
             local_path = download_dir / model_name
 
-            # 检查文件存在
             if local_path.exists():
                 reply = QMessageBox.question(
                     self, "确认覆盖",
@@ -1070,20 +1002,17 @@ class ModelSelectionDialog(QDialog):
                 if reply == QMessageBox.No:
                     return
 
-            # 更新状态
-            status_item = self.network_table.item(row, self.STATUS_COL)
+            status_item = table.item(row, self.STATUS_COL)
             status_item.setText("下载中...")
             status_item.setForeground(QColor("#f39c12"))
 
-            # 执行下载
-            self._perform_download(model_name, local_path)
+            self._perform_download(
+                self._build_model_download_url(model_name, official=official), local_path)
 
-            # 更新状态
             status_item.setText("已下载")
             status_item.setForeground(QColor("#27ae60"))
 
-            # 更新按钮状态
-            widget = self.network_table.cellWidget(row, self.ACTION_COL)
+            widget = table.cellWidget(row, self.ACTION_COL)
             for btn in widget.findChildren(QPushButton):
                 if "下载" in btn.text():
                     btn.setText("✅ 已下载")
@@ -1091,78 +1020,30 @@ class ModelSelectionDialog(QDialog):
 
             QMessageBox.information(
                 self, "下载完成",
-                f"模型 {model_name} 下载完成！\n保存路径: {local_path}"
+                f"{download_done_text} {model_name} 下载完成！\n保存路径: {local_path}"
             )
 
         except Exception as e:
-            # 恢复状态
-            status_item = self.network_table.item(row, self.STATUS_COL)
+            status_item = table.item(row, self.STATUS_COL)
             status_item.setText("下载失败")
             status_item.setForeground(QColor("#e74c3c"))
             QMessageBox.critical(self, "下载失败", f"错误: {str(e)}")
+
+    def download_network_model(self, row):
+        """下载网络模型"""
+        self._download_model_by_row(
+            row, self.network_models, self.network_table, self.download_path_edit, "模型", official=False
+        )
 
     def download_official_network_model(self, row):
         """下载官方网络模型"""
-        if row >= len(self.official_network_models):
-            return
+        self._download_model_by_row(
+            row, self.official_network_models, self.official_network_table,
+            self.official_download_path_edit, "官方模型", official=True
+        )
 
-        model = self.official_network_models[row]
-        model_name = model['文件名']
-        download_dir = Path(self.official_download_path_edit.text())
-
-        try:
-            # 准备下载目录
-            download_dir.mkdir(parents=True, exist_ok=True)
-            local_path = download_dir / model_name
-
-            # 检查文件存在
-            if local_path.exists():
-                reply = QMessageBox.question(
-                    self, "确认覆盖",
-                    f"模型文件 {model_name} 已存在，是否覆盖？",
-                    QMessageBox.Yes | QMessageBox.No
-                )
-                if reply == QMessageBox.No:
-                    return
-
-            # 更新状态
-            status_item = self.official_network_table.item(
-                row, self.STATUS_COL)
-            status_item.setText("下载中...")
-            status_item.setForeground(QColor("#f39c12"))
-
-            # 执行下载
-            self._perform_official_download(model_name, local_path)
-
-            # 更新状态
-            status_item.setText("已下载")
-            status_item.setForeground(QColor("#27ae60"))
-
-            # 更新按钮状态
-            widget = self.official_network_table.cellWidget(
-                row, self.ACTION_COL)
-            for btn in widget.findChildren(QPushButton):
-                if "下载" in btn.text():
-                    btn.setText("✅ 已下载")
-                    btn.setEnabled(False)
-
-            QMessageBox.information(
-                self, "下载完成",
-                f"官方模型 {model_name} 下载完成！\n保存路径: {local_path}"
-            )
-
-        except Exception as e:
-            # 恢复状态
-            status_item = self.official_network_table.item(
-                row, self.STATUS_COL)
-            status_item.setText("下载失败")
-            status_item.setForeground(QColor("#e74c3c"))
-            QMessageBox.critical(self, "下载失败", f"错误: {str(e)}")
-
-    def _perform_download(self, model_name, save_path):
+    def _perform_download(self, url, save_path):
         """执行实际的下载操作"""
-        url = f"https://github.com/JingW-ui/PI-MAPP/releases/download/pt_download/{model_name}"
-
         response = requests.get(url, stream=True, timeout=30)
         response.raise_for_status()
 
@@ -1171,40 +1052,26 @@ class ModelSelectionDialog(QDialog):
                 if chunk:
                     f.write(chunk)
 
-    def _perform_official_download(self, model_name, save_path):
-        """执行官方模型的实际下载操作"""
-        # 官方YOLO模型从Ultralytics官方下载
-        url = f"https://github.com/ultralytics/assets/releases/download/v8.4.0/{model_name}"
-
-        response = requests.get(url, stream=True, timeout=30)
-        response.raise_for_status()
-
-        with open(save_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
+    def _copy_model_download_link(self, model, success_text, official=False):
+        if not model or '文件名' not in model:
+            raise ValueError("模型数据无效")
+        url = self._build_model_download_url(model['文件名'], official=official)
+        QApplication.clipboard().setText(url)
+        QMessageBox.information(self, "复制成功", success_text)
 
     def copy_download_link(self, model):
         """复制下载链接到剪贴板"""
         try:
-            if not model or '文件名' not in model:
-                raise ValueError("模型数据无效")
-
-            url = f"https://github.com/JingW-ui/PI-MAPP/releases/download/pt_download/{model['文件名']}"
-            QApplication.clipboard().setText(url)
-            QMessageBox.information(self, "复制成功", "下载链接已复制到剪贴板")
+            self._copy_model_download_link(
+                model, "下载链接已复制到剪贴板", official=False)
         except Exception as e:
             QMessageBox.critical(self, "复制失败", f"错误: {str(e)}")
 
     def copy_official_download_link(self, model):
         """复制官方模型下载链接到剪贴板"""
         try:
-            if not model or '文件名' not in model:
-                raise ValueError("模型数据无效")
-
-            url = f"https://github.com/ultralytics/assets/releases/download/v8.4.0/{model['文件名']}"
-            QApplication.clipboard().setText(url)
-            QMessageBox.information(self, "复制成功", "官方模型下载链接已复制到剪贴板")
+            self._copy_model_download_link(
+                model, "官方模型下载链接已复制到剪贴板", official=True)
         except Exception as e:
             QMessageBox.critical(self, "复制失败", f"错误: {str(e)}")
 
@@ -1345,10 +1212,13 @@ def _confirm_dialog(parent, title: str, text: str, ok_text: str = "确认删除"
 class PathCellLineEdit(QLineEdit):
     """历史来源路径单元格：可横向查看，失焦后恢复初始展示。"""
 
-    def focusOutEvent(self, event):
-        super().focusOutEvent(event)
+    def _restore_default_view(self):
         self.deselect()
         self.setCursorPosition(0)
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self._restore_default_view()
 
 
 class TaskHistoryPrefsDialog(QDialog):
@@ -1469,17 +1339,15 @@ class TaskHistoryWidget(QWidget):
         self.prefs_btn.clicked.connect(self._on_prefs)
         bar.addWidget(self.prefs_btn, 0)
 
-        self.sel_all_btn = QPushButton("全选")
+        self.sel_all_btn = QPushButton("全选切换")
         self.sel_all_btn.setObjectName("toolBtn")
+        self.sel_all_btn.setIcon(
+            ThemeIcons.icon("check_square", 16, "#6366f1"))
+        self.sel_all_btn.setIconSize(QSize(16, 16))
         self.sel_all_btn.setMinimumHeight(32)
-        self.sel_all_btn.clicked.connect(self._select_all)
+        self.sel_all_btn.setToolTip("全选；再次点击可取消全部勾选")
+        self.sel_all_btn.clicked.connect(self._toggle_select_all)
         bar.addWidget(self.sel_all_btn, 0)
-
-        self.sel_none_btn = QPushButton("取消全选")
-        self.sel_none_btn.setObjectName("toolBtn")
-        self.sel_none_btn.setMinimumHeight(32)
-        self.sel_none_btn.clicked.connect(self._select_none)
-        bar.addWidget(self.sel_none_btn, 0)
 
         self.del_sel_btn = QPushButton("批量删除")
         self.del_sel_btn.setObjectName("toolBtn")
@@ -1506,9 +1374,10 @@ class TaskHistoryWidget(QWidget):
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection)
+            QAbstractItemView.SelectionMode.NoSelection)
         self.table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.table.setMinimumHeight(160)
         self.table.setWordWrap(False)
         self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
@@ -1516,7 +1385,7 @@ class TaskHistoryWidget(QWidget):
         _hh.setStretchLastSection(False)
         _hh.setMinimumSectionSize(72)
         _hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(0, 40)
+        self.table.setColumnWidth(0, 48)
         for col in range(1, ncol):
             _hh.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
         _vh = self.table.verticalHeader()
@@ -1547,24 +1416,27 @@ class TaskHistoryWidget(QWidget):
         if hasattr(win, "log_message"):
             win.log_message("历史任务首选项已保存。")
 
-    def _select_all(self):
+    def _toggle_select_all(self):
+        """单按钮切换：未全选时全选；已全选时全部取消。"""
+        boxes = []
         for r in range(self.table.rowCount()):
-            it = self.table.item(r, 0)
-            if it:
-                it.setCheckState(Qt.CheckState.Checked)
-
-    def _select_none(self):
-        for r in range(self.table.rowCount()):
-            it = self.table.item(r, 0)
-            if it:
-                it.setCheckState(Qt.CheckState.Unchecked)
+            wrap = self.table.cellWidget(r, 0)
+            cb = wrap.findChild(QCheckBox) if wrap is not None else None
+            if cb is not None:
+                boxes.append(cb)
+        if not boxes:
+            return
+        should_check_all = not all(cb.isChecked() for cb in boxes)
+        for cb in boxes:
+            cb.setChecked(should_check_all)
 
     def _delete_selected(self):
         ids = []
         for r in range(self.table.rowCount()):
-            it = self.table.item(r, 0)
-            if it and it.checkState() == Qt.CheckState.Checked:
-                rid = it.data(Qt.ItemDataRole.UserRole)
+            wrap = self.table.cellWidget(r, 0)
+            cb = wrap.findChild(QCheckBox) if wrap is not None else None
+            if cb is not None and cb.isChecked():
+                rid = cb.property("row_id")
                 if rid is not None:
                     ids.append(int(rid))
         if not ids:
@@ -1609,12 +1481,17 @@ class TaskHistoryWidget(QWidget):
             inference_s,
             note,
         ) = row
-        ch = QTableWidgetItem()
-        ch.setFlags(
-            Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
-        ch.setCheckState(Qt.CheckState.Unchecked)
-        ch.setData(Qt.ItemDataRole.UserRole, int(nid))
-        self.table.setItem(table_row, 0, ch)
+        cb = QCheckBox()
+        cb.setObjectName("historyRowCheck")
+        cb.setTristate(False)
+        cb.setChecked(False)
+        cb.setProperty("row_id", int(nid))
+        cb_wrap = QWidget()
+        cb_lay = QHBoxLayout(cb_wrap)
+        cb_lay.setContentsMargins(0, 0, 0, 0)
+        cb_lay.setSpacing(0)
+        cb_lay.addWidget(cb, 0, Qt.AlignmentFlag.AlignCenter)
+        self.table.setCellWidget(table_row, 0, cb_wrap)
         vals = [
             time_str,
             task_type or "",
@@ -2524,7 +2401,9 @@ class StyleManager:
                 subcontrol-origin: padding;
                 subcontrol-position: right center;
                 width: 10px;
+                height: 10px;
                 margin-right: 6px;
+                image: url("./assets/icons/chevron_down_dark.svg");
             }
 
             /* 主操作与全局 QPushButton 渐变一致，统一靛蓝 #6366f1 */
@@ -2990,6 +2869,32 @@ class StyleManager:
                 border: none;
                 background: transparent;
             }
+            QCheckBox#historyRowCheck {
+                spacing: 0px;
+                padding: 0px;
+                margin: 0px;
+                background: transparent;
+            }
+            QCheckBox#historyRowCheck::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 3px;
+                border: 1px solid #94a3b8;
+                background: #ffffff;
+            }
+            QCheckBox#historyRowCheck::indicator:hover {
+                border: 1px solid #6366f1;
+                background: #eef2ff;
+            }
+            QCheckBox#historyRowCheck::indicator:checked {
+                border: 1px solid #6366f1;
+                background: #ffffff;
+                image: url("./assets/icons/check_mark_blue.svg");
+            }
+            QCheckBox#historyRowCheck::indicator:disabled {
+                border: 1px solid #cbd5e1;
+                background: #f1f5f9;
+            }
 
             QFrame#headerPill {
                 background: rgba(255, 255, 255, 0.1);
@@ -3234,6 +3139,7 @@ class StyleManager:
                 width: 10px;
                 height: 10px;
                 margin-right: 6px;
+                image: url("./assets/icons/chevron_down_dark.svg");
             }
 
             QMenu#exportDetailMenu {
@@ -3268,6 +3174,22 @@ class StyleManager:
             QPushButton[variant="stop"]:disabled {
                 background: #e2e8f0;
                 color: #94a3b8;
+            }
+            QPushButton#dangerPresetBtn {
+                background: #dc2626;
+                border: none;
+                color: #f8fafc;
+                font-weight: 600;
+            }
+            QPushButton#dangerPresetBtn:hover {
+                background: #b91c1c;
+            }
+            QPushButton#dangerPresetBtn:pressed {
+                background: #991b1b;
+            }
+            QPushButton#dangerPresetBtn:disabled {
+                background: #fecaca;
+                color: #ffffff;
             }
 
             QPushButton#toolBtn {
@@ -3307,7 +3229,7 @@ class StyleManager:
             }
 
             QComboBox {
-                padding: 6px 10px;
+                padding: 6px 30px 6px 10px;
                 border: 1px solid #e2e8f0;
                 border-radius: 10px;
                 background: #ffffff;
@@ -3320,6 +3242,27 @@ class StyleManager:
             QComboBox:focus {
                 border-color: #818cf8;
                 background: #ffffff;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 24px;
+                border: none;
+                border-left: 1px solid #e2e8f0;
+                background: #f8fafc;
+                border-top-right-radius: 10px;
+                border-bottom-right-radius: 10px;
+            }
+            QComboBox::drop-down:hover {
+                background: #eef2ff;
+            }
+            QComboBox::drop-down:pressed {
+                background: #e0e7ff;
+            }
+            QComboBox::down-arrow {
+                image: url("./assets/icons/chevron_down_dark.svg");
+                width: 12px;
+                height: 12px;
             }
 
             QProgressBar {
@@ -3352,13 +3295,48 @@ class StyleManager:
             }
 
             QSpinBox, QDoubleSpinBox {
-                padding: 6px 10px;
+                padding: 6px 24px 6px 10px;
                 border: 1px solid #e2e8f0;
                 border-radius: 10px;
                 background: #ffffff;
                 min-width: 80px;
                 font-size: 12px;
                 color: #0f172a;
+            }
+            QDoubleSpinBox#confSpinField {
+                padding: 6px 24px 6px 10px;
+            }
+            QDoubleSpinBox#confSpinField::up-button,
+            QDoubleSpinBox#confSpinField::down-button {
+                width: 20px;
+                border: none;
+                border-left: 1px solid #e2e8f0;
+                background: #f8fafc;
+            }
+            QDoubleSpinBox#confSpinField::up-button {
+                border-top-right-radius: 10px;
+            }
+            QDoubleSpinBox#confSpinField::down-button {
+                border-top: 1px solid #e2e8f0;
+                border-bottom-right-radius: 10px;
+            }
+            QDoubleSpinBox#confSpinField::up-button:hover,
+            QDoubleSpinBox#confSpinField::down-button:hover {
+                background: #eef2ff;
+            }
+            QDoubleSpinBox#confSpinField::up-button:pressed,
+            QDoubleSpinBox#confSpinField::down-button:pressed {
+                background: #e0e7ff;
+            }
+            QDoubleSpinBox#confSpinField::up-arrow {
+                image: url("./assets/icons/chevron_up_dark.svg");
+                width: 10px;
+                height: 10px;
+            }
+            QDoubleSpinBox#confSpinField::down-arrow {
+                image: url("./assets/icons/chevron_down_dark.svg");
+                width: 10px;
+                height: 10px;
             }
 
             QTabWidget::pane {
@@ -3882,8 +3860,10 @@ class EnhancedDetectionUI(QMainWindow):
         self._font_resize_timer.timeout.connect(self._apply_ui_font_scale)
         self._apply_ui_font_scale()
 
-        # 全局点击事件：用于在“确认删除”高亮状态下，点击其它区域时自动还原按钮
-        self.installEventFilter(self)
+        # 应用级点击事件：保证子控件/空白区点击也能被捕获。
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
 
     def _compute_font_scale(self):
         """按窗口短边相对参考尺寸缩放字号，全屏偏大、缩小窗口略小。"""
@@ -4154,6 +4134,12 @@ class EnhancedDetectionUI(QMainWindow):
         btn.setIcon(ThemeIcons.icon(name, size, color))
         btn.setIconSize(QSize(size, size))
 
+    @staticmethod
+    def _set_btn_icon_keep_color(btn, name: str, color: str = "#6366f1", size: int = 16):
+        """与工具按钮统一：细线图标 + 禁用态保持同色。"""
+        btn.setIcon(ThemeIcons.icon_same_when_disabled(name, size, color))
+        btn.setIconSize(QSize(size, size))
+
     def _apply_card_shadow(self, widget, blur=32, dy=10, alpha=42):
         """设计稿：卡片轻悬浮阴影（靛色光晕）。"""
         eff = QGraphicsDropShadowEffect(widget)
@@ -4280,7 +4266,7 @@ class EnhancedDetectionUI(QMainWindow):
 
         self.start_btn = QPushButton("开始检测")
         self.start_btn.setObjectName("runStartBtn")
-        self._set_btn_icon(self.start_btn, "play", "#ffffff")
+        self._set_btn_icon_keep_color(self.start_btn, "play", "#6366f1", 16)
         self.start_btn.clicked.connect(self.start_detection)
         self.start_btn.setEnabled(False)
         self.start_btn.setProperty("variant", "skyPrimary")
@@ -4296,7 +4282,7 @@ class EnhancedDetectionUI(QMainWindow):
 
         self.pause_btn = QPushButton("暂停")
         self.pause_btn.setObjectName("runPauseBtn")
-        self._set_btn_icon(self.pause_btn, "pause", "#6366f1")
+        self._set_btn_icon_keep_color(self.pause_btn, "pause", "#6366f1", 16)
         self.pause_btn.clicked.connect(self.pause_detection)
         self.pause_btn.setEnabled(False)
         self.pause_btn.setProperty("variant", "secondary")
@@ -4311,7 +4297,7 @@ class EnhancedDetectionUI(QMainWindow):
 
         self.stop_btn = QPushButton("停止")
         self.stop_btn.setObjectName("runStopBtn")
-        self._set_btn_icon(self.stop_btn, "square", "#f8fafc")
+        self._set_btn_icon_keep_color(self.stop_btn, "square", "#6366f1", 16)
         self.stop_btn.clicked.connect(self.stop_detection)
         self.stop_btn.setEnabled(False)
         self.stop_btn.setProperty("variant", "stop")
@@ -4396,6 +4382,7 @@ class EnhancedDetectionUI(QMainWindow):
         align_row(r_model)
         r_model.addWidget(self._toolbar_label("模型"))
         self.model_combo = QComboBox()
+        self.model_combo.setObjectName("modelComboField")
         self.model_combo.setMinimumWidth(96)
         self.model_combo.setMinimumHeight(32)
         self.model_combo.currentTextChanged.connect(self.on_model_changed)
@@ -4424,6 +4411,7 @@ class EnhancedDetectionUI(QMainWindow):
         self.conf_slider.valueChanged.connect(self.on_confidence_changed)
         r_conf.addWidget(self.conf_slider, 1)
         self.conf_spinbox = QDoubleSpinBox()
+        self.conf_spinbox.setObjectName("confSpinField")
         self.conf_spinbox.setRange(0.01, 1.0)
         self.conf_spinbox.setSingleStep(0.01)
         self.conf_spinbox.setValue(0.25)
@@ -4550,6 +4538,7 @@ class EnhancedDetectionUI(QMainWindow):
         align_row(r_pre_top)
         r_pre_top.addWidget(self._toolbar_label("任务预设", 64))
         self.preset_combo = QComboBox()
+        self.preset_combo.setObjectName("presetComboField")
         self.preset_combo.setMinimumHeight(32)
         self.preset_combo.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
@@ -4561,7 +4550,8 @@ class EnhancedDetectionUI(QMainWindow):
         r_pre_btn.setSpacing(8)
         r_pre_btn.setContentsMargins(0, 0, 0, 0)
         self.new_preset_btn = QPushButton("新建预设")
-        self._set_btn_icon(self.new_preset_btn, "folder_plus", "#ffffff")
+        self._set_btn_icon_keep_color(
+            self.new_preset_btn, "folder_plus", "#ffffff", 16)
         self.new_preset_btn.clicked.connect(self.create_new_preset)
         self.new_preset_btn.setProperty("variant", "skyPrimary")
         self.new_preset_btn.setMinimumHeight(34)
@@ -4571,7 +4561,8 @@ class EnhancedDetectionUI(QMainWindow):
         self.new_preset_btn.setToolTip("基于当前配置创建一个新任务预设")
         r_pre_btn.addWidget(self.new_preset_btn, 1)
         self.save_preset_btn = QPushButton("修改预设")
-        self._set_btn_icon(self.save_preset_btn, "save", "#6366f1")
+        self._set_btn_icon_keep_color(
+            self.save_preset_btn, "save", "#6366f1", 16)
         self.save_preset_btn.clicked.connect(self.save_current_preset)
         self.save_preset_btn.setEnabled(False)
         self.save_preset_btn.setProperty("variant", "secondary")
@@ -4582,7 +4573,9 @@ class EnhancedDetectionUI(QMainWindow):
         self.save_preset_btn.setToolTip("将当前配置保存到已选预设")
         r_pre_btn.addWidget(self.save_preset_btn, 1)
         self.delete_preset_btn = QPushButton("删除预设")
-        self._set_btn_icon(self.delete_preset_btn, "trash", "#f8fafc")
+        self.delete_preset_btn.setObjectName("dangerPresetBtn")
+        self._set_btn_icon_keep_color(
+            self.delete_preset_btn, "trash", "#ffffff", 16)
         self.delete_preset_btn.clicked.connect(self.delete_selected_preset)
         self.delete_preset_btn.setEnabled(False)
         self.delete_preset_btn.setProperty("variant", "stop")
@@ -4598,6 +4591,7 @@ class EnhancedDetectionUI(QMainWindow):
         align_row(mode_row)
         mode_row.addWidget(self._toolbar_label("当前模式", 64))
         self.overview_mode_value = QComboBox()
+        self.overview_mode_value.setObjectName("modeComboField")
         self.overview_mode_value.setMinimumHeight(34)
         self.overview_mode_value.setToolTip("直接切换当前任务模式")
         self.overview_mode_value.currentTextChanged.connect(
@@ -5639,9 +5633,38 @@ class EnhancedDetectionUI(QMainWindow):
             self._refresh_preset_combo()
             self.log_message(f"任务预设已删除: {preset_name}")
 
+    def _reset_history_path_cells_on_outside_click(self, global_pos):
+        """点击路径框外部时，恢复历史来源路径的默认显示。"""
+        thw = getattr(self, "task_history_widget", None)
+        tb = getattr(thw, "table", None)
+        if tb is None:
+            return
+        source_col = getattr(thw, "_SOURCE_COL", 7)
+        for r in range(tb.rowCount()):
+            src_edit = tb.cellWidget(r, source_col)
+            if not isinstance(src_edit, PathCellLineEdit):
+                continue
+            local_pos = src_edit.mapFromGlobal(global_pos)
+            if not src_edit.rect().contains(local_pos):
+                src_edit._restore_default_view()
+
     def eventFilter(self, obj, event):
         """当处于“确认删除”状态时，点击其它区域会自动取消高亮。"""
         try:
+            if event.type() == QEvent.MouseButtonPress:
+                global_pos = event.globalPos()
+                # 历史来源路径：应用内点击路径框外部时恢复默认展示。
+                self._reset_history_path_cells_on_outside_click(global_pos)
+
+                # 历史任务表：点击表格外任意区域时，取消当前行选中高亮
+                thw = getattr(self, "task_history_widget", None)
+                tb = getattr(thw, "table", None)
+                if tb is not None and tb.selectionModel() and tb.selectionModel().hasSelection():
+                    vp_pos = tb.viewport().mapFromGlobal(global_pos)
+                    if not tb.viewport().rect().contains(vp_pos):
+                        tb.clearSelection()
+                        tb.setCurrentCell(-1, -1)
+
             if (
                 self._delete_confirm_target
                 and event.type() == QEvent.MouseButtonPress
@@ -5820,11 +5843,13 @@ class EnhancedDetectionUI(QMainWindow):
                 self.monitor_tab.stop_monitoring()
                 if self.monitor_tab.is_monitoring_paused():
                     self.pause_btn.setText("继续")
-                    self._set_btn_icon(self.pause_btn, "play", "#6366f1")
+                    self._set_btn_icon_keep_color(
+                        self.pause_btn, "play", "#6366f1", 16)
                     self.log_message("监控已暂停")
                 else:
                     self.pause_btn.setText("暂停")
-                    self._set_btn_icon(self.pause_btn, "pause", "#6366f1")
+                    self._set_btn_icon_keep_color(
+                        self.pause_btn, "pause", "#6366f1", 16)
                     self.log_message("监控已恢复")
             return
 
@@ -5832,12 +5857,14 @@ class EnhancedDetectionUI(QMainWindow):
             if self.detection_thread.is_paused:
                 self.detection_thread.resume()
                 self.pause_btn.setText("暂停")
-                self._set_btn_icon(self.pause_btn, "pause", "#6366f1")
+                self._set_btn_icon_keep_color(
+                    self.pause_btn, "pause", "#6366f1", 16)
                 self.log_message("检测已恢复")
             else:
                 self.detection_thread.pause()
                 self.pause_btn.setText("继续")
-                self._set_btn_icon(self.pause_btn, "play", "#6366f1")
+                self._set_btn_icon_keep_color(
+                    self.pause_btn, "play", "#6366f1", 16)
                 self.log_message("检测已暂停")
 
     def stop_detection(self):
@@ -5989,7 +6016,7 @@ class EnhancedDetectionUI(QMainWindow):
             self._set_progress_state("idle")
         self.update_detection_ui_state(False)
         self.pause_btn.setText("暂停")
-        self._set_btn_icon(self.pause_btn, "pause", "#6366f1")
+        self._set_btn_icon_keep_color(self.pause_btn, "pause", "#6366f1", 16)
         bt = getattr(self, "batch_detection_thread", None)
         if bt is None or not getattr(bt, "is_running", False):
             self._history_batch_mode = False
@@ -6153,7 +6180,6 @@ class EnhancedDetectionUI(QMainWindow):
         """清空显示窗口"""
         self._last_preview_original = None
         self._last_preview_result = None
-        self.original_label.clear()
         self.original_label.clear()
         self.result_label.clear()
         self.original_label.setText("暂无输入源\n请选择图片、视频或摄像头以开始预览")

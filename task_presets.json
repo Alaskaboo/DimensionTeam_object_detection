@@ -3,7 +3,7 @@
     "model_name": "best.pt",
     "confidence_threshold": 0.47,
     "source_type": "image",
-    "source_path": "C:/Users/Alaskaboo/Desktop/test/00001.jpg",
+    "source_path": "C:\\Users\\Alaskaboo\\Desktop\\test\\00001.jpg",
     "save_dir": "e:\\Code\\DimensionTeam_object_detection\\results",
     "camera_id": -1
   }
