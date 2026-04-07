@@ -4573,12 +4573,12 @@ class EnhancedDetectionUI(QMainWindow):
         self.save_preset_btn.setToolTip("将当前配置保存到已选预设")
         r_pre_btn.addWidget(self.save_preset_btn, 1)
         self.delete_preset_btn = QPushButton("删除预设")
-        self.delete_preset_btn.setObjectName("dangerPresetBtn")
+        self.delete_preset_btn.setObjectName("presetDeleteBtn")
         self._set_btn_icon_keep_color(
-            self.delete_preset_btn, "trash", "#ffffff", 16)
+            self.delete_preset_btn, "trash", "#6366f1", 16)
         self.delete_preset_btn.clicked.connect(self.delete_selected_preset)
         self.delete_preset_btn.setEnabled(False)
-        self.delete_preset_btn.setProperty("variant", "stop")
+        self.delete_preset_btn.setProperty("variant", "secondary")
         self.delete_preset_btn.setMinimumHeight(34)
         self.delete_preset_btn.setMinimumWidth(0)
         self.delete_preset_btn.setSizePolicy(
@@ -5467,6 +5467,8 @@ class EnhancedDetectionUI(QMainWindow):
             self.delete_preset_btn.setText("删除预设")
             self.delete_preset_btn.setToolTip("删除当前选中的任务预设")
             self.delete_preset_btn.setStyleSheet("")
+            self._set_btn_icon_keep_color(
+                self.delete_preset_btn, "trash", "#6366f1", 16)
 
     def create_new_preset(self):
         """快速新建预设"""
@@ -5619,6 +5621,8 @@ class EnhancedDetectionUI(QMainWindow):
             self._delete_confirm_target = preset_name
             self.delete_preset_btn.setText("确认删除")
             self.delete_preset_btn.setToolTip(f"再次点击删除预设「{preset_name}」")
+            self._set_btn_icon_keep_color(
+                self.delete_preset_btn, "trash", "#ffffff", 16)
             self.delete_preset_btn.setStyleSheet(
                 "background:#dc2626;color:#ffffff;border:1px solid #b91c1c;border-radius:12px;"
             )
@@ -5630,6 +5634,8 @@ class EnhancedDetectionUI(QMainWindow):
             self.delete_preset_btn.setText("删除预设")
             self.delete_preset_btn.setToolTip("删除当前选中的任务预设")
             self.delete_preset_btn.setStyleSheet("")
+            self._set_btn_icon_keep_color(
+                self.delete_preset_btn, "trash", "#6366f1", 16)
             self._refresh_preset_combo()
             self.log_message(f"任务预设已删除: {preset_name}")
 
@@ -5678,6 +5684,8 @@ class EnhancedDetectionUI(QMainWindow):
                     self.delete_preset_btn.setText("删除预设")
                     self.delete_preset_btn.setToolTip("删除当前选中的任务预设")
                     self.delete_preset_btn.setStyleSheet("")
+                    self._set_btn_icon_keep_color(
+                        self.delete_preset_btn, "trash", "#6366f1", 16)
         except Exception:
             pass
 
