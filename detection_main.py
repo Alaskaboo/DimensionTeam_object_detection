@@ -1234,38 +1234,74 @@ class TaskHistoryPrefsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("历史任务 — 首选项")
         self.setModal(True)
+        self.setMinimumWidth(560)
         self._base_dir = Path(base_dir)
         self._db_path = self._base_dir / "task_history.db"
         self._on_purged = on_purged
 
         root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(12)
+
+        intro = QLabel("配置历史记录保留策略。清空历史仅影响本地数据库文件。")
+        intro.setWordWrap(True)
+        intro.setObjectName("wfMutedHint")
+        root.addWidget(intro)
+
         form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
         self._max_spin = QSpinBox()
+        self._max_spin.setObjectName("prefsMaxSpinField")
         self._max_spin.setRange(50, 20_000)
         self._max_spin.setValue(initial_max)
         self._max_spin.setSuffix(" 条")
-        form.addRow("最多保留（超出则从最旧删除）：", self._max_spin)
+        self._max_spin.setMinimumHeight(30)
+        self._max_spin.setToolTip("超过该数量时，系统会自动删除最旧记录。")
+        form.addRow("最多保留记录：", self._max_spin)
+        root.addLayout(form)
 
-        lab_db = QLabel(str(self._db_path.resolve()))
-        lab_db.setWordWrap(True)
-        lab_db.setObjectName("wfMutedHint")
-        form.addRow("本地库文件：", lab_db)
+        db_row = QVBoxLayout()
+        db_row.setContentsMargins(0, 0, 0, 0)
+        db_row.setSpacing(6)
+        db_title = QLabel("本地数据库文件")
+        db_title.setObjectName("toolbarFieldLabel")
+        db_row.addWidget(db_title)
+        lab_db = QLineEdit(str(self._db_path.resolve()))
+        lab_db.setObjectName("pathReadonlyField")
+        lab_db.setReadOnly(True)
+        lab_db.setMinimumHeight(32)
+        lab_db.setCursorPosition(0)
+        db_row.addWidget(lab_db)
+        root.addLayout(db_row)
 
         hint = QLabel(
-            "单机使用默认采用内置 SQLite 文件，无需启动数据库服务，备份时复制上述文件即可。\n\n"
-            "若需多机共享、与现有业务库统一，可再接入 MySQL（需单独开发连接配置与表结构迁移）。"
+            "单机默认使用 SQLite，无需额外数据库服务；备份时复制上方文件即可。"
         )
         hint.setWordWrap(True)
         hint.setObjectName("wfMutedHint")
-        form.addRow("存储说明：", hint)
-        root.addLayout(form)
+        root.addWidget(hint)
 
+        root.addSpacing(2)
         purge_btn = QPushButton("清空全部历史记录…")
+        purge_btn.setProperty("variant", "secondary")
+        purge_btn.setIcon(ThemeIcons.icon("trash", 16, "#dc2626"))
+        purge_btn.setIconSize(QSize(16, 16))
+        purge_btn.setToolTip("该操作不可恢复，请谨慎执行。")
         purge_btn.clicked.connect(self._on_purge_all)
         root.addWidget(purge_btn)
 
         bb = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        ok_btn = bb.button(QDialogButtonBox.StandardButton.Ok)
+        cancel_btn = bb.button(QDialogButtonBox.StandardButton.Cancel)
+        if ok_btn is not None:
+            ok_btn.setText("保存设置")
+            ok_btn.setProperty("variant", "skyPrimary")
+        if cancel_btn is not None:
+            cancel_btn.setText("取消")
+            cancel_btn.setProperty("variant", "secondary")
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         root.addWidget(bb)
@@ -3306,8 +3342,18 @@ class StyleManager:
             QDoubleSpinBox#confSpinField {
                 padding: 6px 24px 6px 10px;
             }
+            QSpinBox#prefsMaxSpinField {
+                padding: 6px 24px 6px 10px;
+            }
             QDoubleSpinBox#confSpinField::up-button,
             QDoubleSpinBox#confSpinField::down-button {
+                width: 20px;
+                border: none;
+                border-left: 1px solid #e2e8f0;
+                background: #f8fafc;
+            }
+            QSpinBox#prefsMaxSpinField::up-button,
+            QSpinBox#prefsMaxSpinField::down-button {
                 width: 20px;
                 border: none;
                 border-left: 1px solid #e2e8f0;
@@ -3316,7 +3362,14 @@ class StyleManager:
             QDoubleSpinBox#confSpinField::up-button {
                 border-top-right-radius: 10px;
             }
+            QSpinBox#prefsMaxSpinField::up-button {
+                border-top-right-radius: 10px;
+            }
             QDoubleSpinBox#confSpinField::down-button {
+                border-top: 1px solid #e2e8f0;
+                border-bottom-right-radius: 10px;
+            }
+            QSpinBox#prefsMaxSpinField::down-button {
                 border-top: 1px solid #e2e8f0;
                 border-bottom-right-radius: 10px;
             }
@@ -3324,8 +3377,16 @@ class StyleManager:
             QDoubleSpinBox#confSpinField::down-button:hover {
                 background: #eef2ff;
             }
+            QSpinBox#prefsMaxSpinField::up-button:hover,
+            QSpinBox#prefsMaxSpinField::down-button:hover {
+                background: #eef2ff;
+            }
             QDoubleSpinBox#confSpinField::up-button:pressed,
             QDoubleSpinBox#confSpinField::down-button:pressed {
+                background: #e0e7ff;
+            }
+            QSpinBox#prefsMaxSpinField::up-button:pressed,
+            QSpinBox#prefsMaxSpinField::down-button:pressed {
                 background: #e0e7ff;
             }
             QDoubleSpinBox#confSpinField::up-arrow {
@@ -3333,7 +3394,17 @@ class StyleManager:
                 width: 10px;
                 height: 10px;
             }
+            QSpinBox#prefsMaxSpinField::up-arrow {
+                image: url("./assets/icons/chevron_up_dark.svg");
+                width: 10px;
+                height: 10px;
+            }
             QDoubleSpinBox#confSpinField::down-arrow {
+                image: url("./assets/icons/chevron_down_dark.svg");
+                width: 10px;
+                height: 10px;
+            }
+            QSpinBox#prefsMaxSpinField::down-arrow {
                 image: url("./assets/icons/chevron_down_dark.svg");
                 width: 10px;
                 height: 10px;
