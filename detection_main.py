@@ -2,6 +2,7 @@ import ast
 import csv
 import functools
 import json
+import os
 import re
 import sys
 import threading
@@ -12,6 +13,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import requests
+from PIL import Image, ImageDraw, ImageFont
 from PySide6.QtCore import *
 from PySide6.QtGui import *
 from PySide6.QtWidgets import *
@@ -27,6 +29,80 @@ else:
 
 from theme_icons import ThemeIcons
 from task_history_store import TaskHistoryStore
+
+_overlay_cjk_font_cache: dict[int, ImageFont.ImageFont] = {}
+
+
+def _load_overlay_cjk_font(size_px: int) -> ImageFont.FreeTypeFont:
+    """叠加层用字体：须支持中文路径；按字号缓存。"""
+    size_px = max(10, min(40, int(size_px)))
+    if size_px in _overlay_cjk_font_cache:
+        return _overlay_cjk_font_cache[size_px]
+    paths: list[str] = []
+    bundled = base_dir / "assets" / "fonts" / "NotoSansSC-Regular.ttf"
+    if bundled.is_file():
+        paths.append(str(bundled))
+    if sys.platform == "win32":
+        windir = os.environ.get("WINDIR", r"C:\Windows")
+        paths.extend([
+            os.path.join(windir, "Fonts", "msyh.ttc"),
+            os.path.join(windir, "Fonts", "msyhbd.ttc"),
+            os.path.join(windir, "Fonts", "simhei.ttf"),
+            os.path.join(windir, "Fonts", "simsun.ttc"),
+        ])
+    elif sys.platform == "darwin":
+        paths.extend([
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        ])
+    else:
+        paths.extend([
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        ])
+    font = None
+    for p in paths:
+        if not p or not os.path.isfile(p):
+            continue
+        try:
+            font = ImageFont.truetype(p, size_px, index=0)
+            break
+        except OSError:
+            try:
+                font = ImageFont.truetype(p, size_px)
+                break
+            except OSError:
+                continue
+    if font is None:
+        font = ImageFont.load_default()
+    _overlay_cjk_font_cache[size_px] = font
+    return font
+
+
+def _overlay_text_width(draw: ImageDraw.ImageDraw, text: str, font) -> int:
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return max(0, bbox[2] - bbox[0])
+
+
+def _fit_overlay_line_text(
+        text: str, font, draw: ImageDraw.ImageDraw, max_width: int) -> str:
+    if not text:
+        return text
+    if _overlay_text_width(draw, text, font) <= max_width:
+        return text
+    ell = "…"
+    if _overlay_text_width(draw, ell, font) > max_width:
+        return ell
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        cand = text[:mid] + ell
+        if _overlay_text_width(draw, cand, font) <= max_width:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo] + ell if lo > 0 else ell
 
 
 class BatchDetectionThread(QThread):
@@ -1154,7 +1230,7 @@ _DETECTION_EXPORT_META_ORDER = (
 )
 
 _DETECTION_EXPORT_DETAIL_FIELDS = [
-    "序号", "类别", "置信度", "x1", "y1", "x2", "y2",
+    "帧序号", "帧时间", "序号", "类别", "置信度", "x1", "y1", "x2", "y2",
     "宽", "高", "面积",
 ]
 
@@ -1325,11 +1401,98 @@ class TaskHistoryPrefsDialog(QDialog):
         return self._max_spin.value()
 
 
+class HistoryTableScrollHost(QScrollArea):
+    """历史表格外层横向滚动：内容区固定为「列宽之和」，避免 QTableWidget 在 Tab 内被压扁列宽。
+
+    竖向仍使用表格自带的垂直滚动条；横向只在本区域底部滚动条（或 Shift+滚轮）移动。
+    """
+
+    def __init__(self, table: QTableWidget):
+        super().__init__()
+        self._table = table
+        self._inner = QWidget()
+        self.setWidgetResizable(False)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        il = QVBoxLayout(self._inner)
+        il.setContentsMargins(0, 0, 0, 0)
+        il.setSpacing(0)
+        il.addWidget(table)
+        self.setWidget(self._inner)
+        table.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        table.setSizeAdjustPolicy(
+            QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
+        table.setSizePolicy(
+            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Expanding,
+        )
+
+    def set_content_width(self, w: int) -> None:
+        w = max(400, int(w))
+        self._inner.setFixedWidth(w)
+        self._table.setFixedWidth(w)
+        self._sync_inner_height()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_inner_height()
+
+    def _sync_inner_height(self) -> None:
+        h = max(120, self.viewport().height())
+        self._inner.setFixedHeight(h)
+        self._table.setFixedHeight(h)
+
+
+class TaskHistoryTable(QTableWidget):
+    """支持 Shift+滚轮横向滚动（委托给外层 HistoryTableScrollHost）。"""
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            w = self.parentWidget()
+            while w is not None:
+                if isinstance(w, QScrollArea):
+                    hbar = w.horizontalScrollBar()
+                    if hbar is not None:
+                        d = event.angleDelta().y()
+                        if d:
+                            hbar.setValue(hbar.value() - d)
+                            event.accept()
+                            return
+                    break
+                w = w.parentWidget()
+        super().wheelEvent(event)
+
+
 class TaskHistoryWidget(QWidget):
     """底部「历史任务」：SQLite 持久化，支持多选删除与首选项。"""
 
-    _HEADERS = ["", "时间", "任务类型", "模型", "目标数", "耗时(s)", "备注", "来源"]
-    _SOURCE_COL = 7
+    _HEADERS = [
+        "",
+        "状态",
+        "任务类型",
+        "模型",
+        "目标数",
+        "总耗时(s)",
+        "平均FPS",
+        "帧进度",
+        "累计推理(s)",
+        "开始时间",
+        "结束时间",
+        "备注",
+        "来源",
+    ]
+    _SOURCE_COL = 12  # 来源列（0=勾选，1…12 为数据列）
+    # 数据列默认像素宽（与表头顺序一致）；总宽大于视口时应出现横向滚动条
+    _HISTORY_DATA_COL_WIDTHS = (
+        # 状态, 任务类型, 模型, 目标数, 总耗时, FPS, 帧进度, 累计推理, 开始时间, 结束时间, 备注, 来源
+        180, 130, 140, 88, 98, 98, 118, 122, 178, 178, 320, 420,
+    )
 
     def __init__(self, base_dir: Path):
         super().__init__()
@@ -1337,17 +1500,24 @@ class TaskHistoryWidget(QWidget):
         self._prefs_path = self._base_dir / "task_history_prefs.json"
         self._store = TaskHistoryStore(self._base_dir / "task_history.db")
         self._prefs = self._load_prefs()
+        self._mode_filter = "all"
+        self._current_page = 1
+        self._total_rows = 0
+        self._total_pages = 1
         self._build_ui()
         self._reload_from_store()
 
     def _load_prefs(self) -> dict:
-        d = {"max_records": 500}
+        d = {"page_size": 25}
         if self._prefs_path.exists():
             try:
                 d.update(json.loads(
                     self._prefs_path.read_text(encoding="utf-8")))
             except Exception:
                 pass
+        # 兼容旧首选项键
+        if "page_size" not in d:
+            d["page_size"] = int(d.get("max_records", 25) or 25)
         return d
 
     def _save_prefs(self) -> None:
@@ -1356,8 +1526,37 @@ class TaskHistoryWidget(QWidget):
             encoding="utf-8",
         )
 
-    def _max_records(self) -> int:
-        return int(self._prefs.get("max_records", 500))
+    def _page_size(self) -> int:
+        return max(1, int(self._prefs.get("page_size", 20)))
+
+    def _apply_history_column_geometry(self) -> None:
+        """钉死列宽并同步外层横向滚动区域的内容宽度（列宽之和 + 勾选列）。"""
+        tw = getattr(self, "table", None)
+        if tw is None:
+            return
+        ncol = tw.columnCount()
+        if ncol < 2:
+            return
+        hh = tw.horizontalHeader()
+        hh.setStretchLastSection(False)
+        hh.setCascadingSectionResizes(False)
+        hh.setMinimumSectionSize(48)
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        tw.setColumnWidth(0, 48)
+        widths = self._HISTORY_DATA_COL_WIDTHS
+        for col in range(1, ncol):
+            hh.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
+            wi = widths[col - 1] if col - 1 < len(widths) else 96
+            hh.resizeSection(col, int(wi))
+        total_w = sum(tw.columnWidth(i) for i in range(ncol))
+        host = getattr(self, "_history_table_scroll", None)
+        if host is not None:
+            host.set_content_width(total_w)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # 切换 Tab 后布局完成再钉列宽（否则仍可能被父布局压一轮）
+        QTimer.singleShot(0, self._apply_history_column_geometry)
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -1397,15 +1596,29 @@ class TaskHistoryWidget(QWidget):
         layout.addLayout(bar)
 
         ncol = len(self._HEADERS)
-        self.table = QTableWidget(0, ncol)
+        self.table = TaskHistoryTable(0, ncol)
         self.table.setObjectName("wfHistoryTable")
         self.table.setHorizontalHeaderLabels(self._HEADERS)
+        _tips = {
+            1: "完成 / 手动停止 / 异常 / 未完成",
+            5: "整次任务总耗时（秒）：含读帧、推理、节流等",
+            6: "平均处理帧率：视频为 已处理帧/墙钟；单图为 1/墙钟；批量为 张数/累计推理秒",
+            7: "视频：已处理/总帧；批量：张数/张数；其它为 —",
+            8: "各帧推理时间之和（秒）",
+            9: "点击「开始检测」的时间（若可获知）",
+            10: "任务结束并写入历史的时间",
+        }
+        for hi, tip in _tips.items():
+            hitem = self.table.horizontalHeaderItem(hi)
+            if hitem is not None and tip:
+                hitem.setToolTip(tip)
         for hi in range(ncol):
             item = self.table.horizontalHeaderItem(hi)
             if item:
                 item.setTextAlignment(
                     Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
         self.table.verticalHeader().setVisible(False)
+        self.table.setShowGrid(False)
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
@@ -1413,44 +1626,220 @@ class TaskHistoryWidget(QWidget):
             QAbstractItemView.SelectionMode.NoSelection)
         self.table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.table.setMinimumHeight(160)
         self.table.setWordWrap(False)
         self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
-        _hh = self.table.horizontalHeader()
-        _hh.setStretchLastSection(False)
-        _hh.setMinimumSectionSize(72)
-        _hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(0, 48)
-        for col in range(1, ncol):
-            _hh.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
+        self.table.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.table.setHorizontalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._history_table_scroll = HistoryTableScrollHost(self.table)
+        self._history_table_scroll.setObjectName("wfHistoryTableScroll")
+        self._apply_history_column_geometry()
         _vh = self.table.verticalHeader()
         _vh.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         _vh.setDefaultSectionSize(42)
         _vh.setMinimumSectionSize(38)
         self.table.setItemDelegate(NoFocusTableItemDelegate(self.table))
-        self.table.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Expanding,
-        )
-        layout.addWidget(self.table, 1)
+        self.table.setToolTip(
+            "提示：底部横向滚动条在外层区域；"
+            "或在表内按住 Shift 再滚动鼠标滚轮左右查看")
+        layout.addWidget(self._history_table_scroll, 1)
+
+        pager = QHBoxLayout()
+        pager.setContentsMargins(8, 0, 8, 4)
+        pager.setSpacing(10)
+        self.page_total_label = QLabel("共 0 条")
+        self.page_total_label.setObjectName("wfMutedHint")
+        self.page_total_label.setMinimumHeight(34)
+        self.page_size_label = QLabel("每页")
+        self.page_size_label.setObjectName("wfMutedHint")
+        self.page_size_label.setMinimumHeight(34)
+        self.page_size_combo = QComboBox()
+        self.page_size_combo.setObjectName("historyPageSizeCombo")
+        self.page_size_combo.addItems(["10", "20", "25", "50", "100", "200"])
+        cur_ps = str(self._page_size())
+        if self.page_size_combo.findText(cur_ps) < 0:
+            self.page_size_combo.addItem(cur_ps)
+        self.page_size_combo.setCurrentText(cur_ps)
+        self.page_size_combo.setMinimumHeight(34)
+        self.page_size_combo.setFixedWidth(84)
+        self.page_size_combo.setToolTip("每页条数")
+        self.page_size_combo.currentTextChanged.connect(
+            self._on_page_size_combo_changed)
+        self.page_count_hint = QLabel("条")
+        self.page_count_hint.setObjectName("wfMutedHint")
+        self.page_count_hint.setMinimumHeight(34)
+
+        self.page_prev_btn = QPushButton("上一页")
+        self.page_next_btn = QPushButton("下一页")
+        for b in (self.page_prev_btn, self.page_next_btn):
+            b.setObjectName("toolBtn")
+            b.setMinimumHeight(34)
+            b.setMinimumWidth(74)
+        self.page_prev_btn.clicked.connect(
+            lambda: self._goto_page(self._current_page - 1))
+        self.page_next_btn.clicked.connect(
+            lambda: self._goto_page(self._current_page + 1))
+
+        self.page_num_row = QWidget()
+        self.page_num_row.setObjectName("historyPageNumRow")
+        self.page_num_layout = QHBoxLayout(self.page_num_row)
+        self.page_num_layout.setContentsMargins(0, 0, 0, 0)
+        self.page_num_layout.setSpacing(4)
+        self._page_token_widgets = []
+
+        self.page_jump_label = QLabel("跳至")
+        self.page_jump_label.setObjectName("wfMutedHint")
+        self.page_jump_label.setMinimumHeight(34)
+        self.page_jump_edit = QLineEdit()
+        self.page_jump_edit.setObjectName("historyPageJumpEdit")
+        self.page_jump_edit.setFixedWidth(56)
+        self.page_jump_edit.setMinimumHeight(34)
+        self.page_jump_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.page_jump_edit.setPlaceholderText("")
+        self.page_jump_edit.setValidator(
+            QIntValidator(1, 999999, self.page_jump_edit))
+        self.page_jump_edit.setToolTip("输入页码后按回车")
+        self.page_jump_edit.returnPressed.connect(self._on_jump_page)
+        self.page_jump_tail = QLabel("页")
+        self.page_jump_tail.setObjectName("wfMutedHint")
+        self.page_jump_tail.setMinimumHeight(34)
+
+        self.page_info_label = QLabel("1 / 1")
+        self.page_info_label.setObjectName("wfMutedHint")
+        self.page_info_label.setMinimumHeight(34)
+        pager.addWidget(self.page_total_label, 0)
+        pager.addSpacing(8)
+        pager.addWidget(self.page_size_label, 0)
+        pager.addWidget(self.page_size_combo, 0)
+        pager.addWidget(self.page_count_hint, 0)
+        pager.addStretch(1)
+        pager.addWidget(self.page_prev_btn, 0)
+        pager.addWidget(self.page_num_row, 0)
+        pager.addWidget(self.page_next_btn, 0)
+        pager.addSpacing(12)
+        pager.addWidget(self.page_jump_label, 0)
+        pager.addWidget(self.page_jump_edit, 0)
+        pager.addWidget(self.page_jump_tail, 0)
+        pager.addSpacing(10)
+        pager.addWidget(self.page_info_label, 0)
+        layout.addLayout(pager)
 
     def _on_prefs(self):
         dlg = TaskHistoryPrefsDialog(
             self.window(),
             self._base_dir,
-            self._max_records(),
+            self._page_size(),
             on_purged=self._reload_from_store,
         )
         if dlg.exec() != QDialog.Accepted:
             return
-        self._prefs["max_records"] = dlg.max_records()
-        self._save_prefs()
-        self._store.prune_to_limit(self._max_records())
         self._reload_from_store()
         win = self.window()
         if hasattr(win, "log_message"):
             win.log_message("历史任务首选项已保存。")
+
+    def set_mode_filter(self, mode_key: str) -> None:
+        mk = (mode_key or "all").strip().lower()
+        if mk not in ("all", "image", "video", "batch", "camera", "monitor"):
+            mk = "all"
+        if mk != self._mode_filter:
+            self._mode_filter = mk
+            self._current_page = 1
+            self._reload_from_store()
+
+    def _refresh_pagination_ui(self) -> None:
+        self.page_total_label.setText(f"共 {self._total_rows} 条")
+        self.page_info_label.setText(
+            f"{self._current_page} / {self._total_pages}")
+        has_prev = self._current_page > 1
+        has_next = self._current_page < self._total_pages
+        self.page_prev_btn.setEnabled(has_prev)
+        self.page_next_btn.setEnabled(has_next)
+        self._rebuild_page_tokens()
+
+    def _goto_page(self, page: int) -> None:
+        p = max(1, min(int(page), max(1, int(self._total_pages))))
+        if p != self._current_page:
+            self._current_page = p
+            self._reload_from_store()
+
+    def _on_page_size_changed(self, value: int) -> None:
+        self._prefs["page_size"] = max(1, int(value))
+        self._save_prefs()
+        self._current_page = 1
+        self._reload_from_store()
+
+    def _on_page_size_combo_changed(self, text: str) -> None:
+        try:
+            value = int(text)
+        except Exception:
+            return
+        self._on_page_size_changed(value)
+
+    def _on_jump_page(self) -> None:
+        txt = (self.page_jump_edit.text() or "").strip()
+        if not txt:
+            return
+        try:
+            pg = int(txt)
+        except Exception:
+            return
+        self._goto_page(pg)
+        self.page_jump_edit.selectAll()
+
+    def _clear_page_tokens(self) -> None:
+        while self.page_num_layout.count():
+            item = self.page_num_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._page_token_widgets = []
+
+    def _rebuild_page_tokens(self) -> None:
+        self._clear_page_tokens()
+        total = int(self._total_pages)
+        cur = int(self._current_page)
+
+        def add_page_btn(n: int) -> None:
+            b = QPushButton(str(n))
+            b.setObjectName("pageNumBtn")
+            b.setProperty("activePage", n == cur)
+            b.setMinimumHeight(30)
+            b.setMinimumWidth(30)
+            b.clicked.connect(lambda _=False, p=n: self._goto_page(p))
+            self.page_num_layout.addWidget(b, 0)
+            self._page_token_widgets.append(b)
+
+        def add_ellipsis() -> None:
+            lb = QLabel("...")
+            lb.setObjectName("wfMutedHint")
+            lb.setStyleSheet(
+                "font-size: 13px; color:#94a3b8; font-weight:700;")
+            lb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lb.setFixedWidth(24)
+            self.page_num_layout.addWidget(lb, 0)
+
+        if total <= 7:
+            pages = list(range(1, total + 1))
+        else:
+            pages = [1]
+            left = max(2, cur - 1)
+            right = min(total - 1, cur + 1)
+            if left > 2:
+                pages.append("...")
+            pages.extend(range(left, right + 1))
+            if right < total - 1:
+                pages.append("...")
+            pages.append(total)
+
+        for p in pages:
+            if p == "...":
+                add_ellipsis()
+            else:
+                add_page_btn(int(p))
 
     def _toggle_select_all(self):
         """单按钮切换：未全选时全选；已全选时全部取消。"""
@@ -1492,31 +1881,57 @@ class TaskHistoryWidget(QWidget):
         if not ids:
             return
         self._store.delete_ids(ids)
+        total_after = int(self._store.count())
+        page_size = self._page_size()
+        last_page = max(1, (total_after + page_size - 1) // page_size)
+        if self._current_page > last_page:
+            self._current_page = last_page
         self._reload_from_store()
 
     def _reload_from_store(self):
         if not hasattr(self, "table"):
             return
+        self._total_rows = int(self._store.count_filtered(self._mode_filter))
+        page_size = self._page_size()
+        self._total_pages = max(
+            1, (self._total_rows + page_size - 1) // page_size)
+        self._current_page = max(1, min(self._current_page, self._total_pages))
         self.table.blockSignals(True)
         self.table.clearContents()
         self.table.setRowCount(0)
-        for row in self._store.list_recent(self._max_records()):
+        for row in self._store.list_page_filtered(self._current_page, page_size, self._mode_filter):
             r = self.table.rowCount()
             self.table.insertRow(r)
             self._fill_row(r, row)
         self.table.blockSignals(False)
+        self._apply_history_column_geometry()
+        self._refresh_pagination_ui()
 
     def _fill_row(self, table_row: int, row: tuple):
         (
             nid,
-            time_str,
+            ended_at,
+            started_at,
             task_type,
             source,
             model,
             objects,
-            inference_s,
+            wall_s,
             note,
+            det_status,
+            avg_proc_fps,
+            frames_done,
+            frames_total,
+            sum_infer_s,
         ) = row
+        # 旧数据仅有 note、无 det_status 列时，备注里常见「用户手动停止｜结束 …」
+        det_display = (det_status or "").strip()
+        if not det_display:
+            note_s = (note or "").strip()
+            if "｜" in note_s:
+                det_display = note_s.split("｜", 1)[0].strip()
+            elif " | " in note_s:
+                det_display = note_s.split(" | ", 1)[0].strip()
         cb = QCheckBox()
         cb.setObjectName("historyRowCheck")
         cb.setTristate(False)
@@ -1528,12 +1943,25 @@ class TaskHistoryWidget(QWidget):
         cb_lay.setSpacing(0)
         cb_lay.addWidget(cb, 0, Qt.AlignmentFlag.AlignCenter)
         self.table.setCellWidget(table_row, 0, cb_wrap)
+        fd, ft = int(frames_done), int(frames_total)
+        if ft > 0:
+            frame_txt = f"{fd}/{ft}"
+        elif fd > 0:
+            frame_txt = f"{fd}/—"
+        else:
+            frame_txt = "—"
         vals = [
-            time_str,
+            det_display,
             task_type or "",
             model or "",
             str(objects),
-            f"{float(inference_s):.4f}",
+            f"{float(wall_s):.4f}",
+            f"{float(avg_proc_fps):.2f}" if float(
+                avg_proc_fps) > 1e-9 else "—",
+            frame_txt,
+            f"{float(sum_infer_s):.4f}" if float(sum_infer_s) > 1e-9 else "—",
+            started_at or "",
+            ended_at or "",
             note or "",
             source or "",
         ]
@@ -1554,6 +1982,8 @@ class TaskHistoryWidget(QWidget):
                 continue
             it = QTableWidgetItem(text)
             it.setTextAlignment(align_cv)
+            if c == 11:
+                it.setToolTip(text)
             self.table.setItem(table_row, c, it)
 
     def add_record(
@@ -1565,6 +1995,13 @@ class TaskHistoryWidget(QWidget):
         objects: int,
         inference_s: float,
         note: str = "",
+        *,
+        started_at: str = "",
+        det_status: str = "",
+        avg_proc_fps: float = 0.0,
+        frames_done: int = 0,
+        frames_total: int = 0,
+        sum_infer_s: float = 0.0,
     ):
         self._store.add(
             time_str,
@@ -1574,8 +2011,14 @@ class TaskHistoryWidget(QWidget):
             objects,
             inference_s,
             note,
+            started_at=started_at,
+            det_status=det_status,
+            avg_proc_fps=avg_proc_fps,
+            frames_done=frames_done,
+            frames_total=frames_total,
+            sum_infer_s=sum_infer_s,
         )
-        self._store.prune_to_limit(self._max_records())
+        self._current_page = 1
         self._reload_from_store()
 
 
@@ -1596,6 +2039,8 @@ class DetectionResultWidget(QWidget):
     def __init__(self):
         super().__init__()
         self._detail_csv_rows = []
+        self._video_detail_rows = []
+        self._video_last_frame_no = 0
         self._export_meta = {}
         self.init_ui()
 
@@ -1661,6 +2106,10 @@ class DetectionResultWidget(QWidget):
         self.result_table.setMinimumHeight(148)
         self.result_table.setMaximumHeight(300)
         self.result_table.setAlternatingRowColors(True)
+        self.result_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection)
+        self.result_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.result_table.setShowGrid(False)
         self.result_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.result_table.verticalScrollBar().rangeChanged.connect(
             lambda *_: QTimer.singleShot(0,
@@ -1847,10 +2296,16 @@ class DetectionResultWidget(QWidget):
             if key in self._export_meta:
                 v = self._export_meta[key]
                 ws1.append([key, v if v is not None else ""])
+        ws1.column_dimensions["A"].width = 28
+        ws1.column_dimensions["B"].width = 86
         ws2 = wb.create_sheet("目标明细")
         ws2.append(_DETECTION_EXPORT_DETAIL_FIELDS)
         for row in self._detail_csv_rows:
             ws2.append([row.get(k) for k in _DETECTION_EXPORT_DETAIL_FIELDS])
+        ws2.column_dimensions["A"].width = 10
+        ws2.column_dimensions["B"].width = 8
+        ws2.column_dimensions["C"].width = 16
+        ws2.column_dimensions["D"].width = 12
         wb.save(save_path)
         return True
 
@@ -1864,24 +2319,65 @@ class DetectionResultWidget(QWidget):
 
     def update_results(self, results, class_names, inference_time):
         """更新检测结果"""
+        win = self.window()
+        src_type = getattr(win, "current_source_type", "") or ""
+        is_stream_source = src_type in ("video", "camera")
         if not results or not results[0].boxes or len(results[0].boxes) == 0:
-            self.result_table.setRowCount(0)
-            self._detail_csv_rows = []
-            self._export_meta = {}
-            win = self.window()
-            if hasattr(win, "export_detail_btn"):
-                win.export_detail_btn.setEnabled(False)
-            self.stats_label.setText("未检测到目标")
+            is_stream_running = bool(
+                hasattr(win, "current_source_type")
+                and getattr(win, "current_source_type", None) in ("video", "camera")
+                and hasattr(win, "detection_thread")
+                and getattr(win.detection_thread, "is_running", False)
+            )
+            # 流检测（视频/摄像头）过程中遇到“当前帧无目标”时，也记录空帧，
+            # 这样导出可保持逐帧时间轴完整。
+            if is_stream_running and is_stream_source:
+                frame_no = int(getattr(win, "_video_export_frame_index", 0) or 0)
+                if frame_no <= 0:
+                    frame_no = self._video_last_frame_no + 1
+                self._video_last_frame_no = max(self._video_last_frame_no, frame_no)
+                frame_time_str = datetime.now().strftime("%H:%M:%S")
+                self._video_detail_rows.append({
+                    "帧序号": frame_no,
+                    "帧时间": frame_time_str,
+                    "序号": 0,
+                    "类别": "无目标",
+                    "置信度": "",
+                    "x1": "",
+                    "y1": "",
+                    "x2": "",
+                    "y2": "",
+                    "宽": "",
+                    "高": "",
+                    "面积": "",
+                })
+                self._detail_csv_rows = list(self._video_detail_rows)
+            if not is_stream_running:
+                self.result_table.setRowCount(0)
+                self._detail_csv_rows = []
+                self._video_detail_rows = []
+                self._video_last_frame_no = 0
+                self._export_meta = {}
+            if hasattr(win, "_sync_export_detail_button_state"):
+                win._sync_export_detail_button_state(
+                    bool(self._detail_csv_rows))
+            elif hasattr(win, "export_detail_btn"):
+                win.export_detail_btn.setEnabled(bool(self._detail_csv_rows))
+            if is_stream_running and self._detail_csv_rows:
+                self.stats_label.setText("当前帧未检测到目标（保留上一帧明细）")
+            else:
+                self.stats_label.setText("未检测到目标")
             return
 
         boxes = results[0].boxes
         confidences = boxes.conf.cpu().numpy()
         classes = boxes.cls.cpu().numpy().astype(int)
         xyxy = boxes.xyxy.cpu().numpy()
+        frame_time_str = datetime.now().strftime("%H:%M:%S")
 
         # 更新表格
         self.result_table.setRowCount(len(confidences))
-        self._detail_csv_rows = []
+        frame_rows = []
 
         class_counts = {}
         for i, (conf, cls, box) in enumerate(zip(confidences, classes, xyxy)):
@@ -1932,7 +2428,9 @@ class DetectionResultWidget(QWidget):
             cell_area.setToolTip(f"{size_txt} → {area_px}")
             self.result_table.setItem(i, 6, cell_area)
 
-            self._detail_csv_rows.append({
+            frame_rows.append({
+                "帧序号": "",
+                "帧时间": frame_time_str,
                 "序号": i + 1,
                 "类别": class_name,
                 "置信度": round(float(conf), 6),
@@ -1953,7 +2451,6 @@ class DetectionResultWidget(QWidget):
             inf_s = 0.0
             start_local = end_local
 
-        win = self.window()
         model_path = ""
         if hasattr(win, "_loaded_model_path") and win._loaded_model_path:
             model_path = str(win._loaded_model_path)
@@ -1972,11 +2469,10 @@ class DetectionResultWidget(QWidget):
         main_tab = ""
         if hasattr(win, "tab_widget"):
             _ti = win.tab_widget.currentIndex()
-            _tabs = ["实时检测", "批量分析", "设备监控"]
+            _tabs = ["文件检测", "批量分析", "设备监控", "历史任务"]
             if 0 <= _ti < len(_tabs):
                 main_tab = _tabs[_ti]
 
-        src_type = getattr(win, "current_source_type", "") or ""
         src_type_cn = {
             "image": "单张图片",
             "video": "视频文件",
@@ -2002,12 +2498,37 @@ class DetectionResultWidget(QWidget):
         if inf_s > 1e-12:
             tfps = round(1.0 / inf_s, 4)
 
+        if is_stream_source:
+            frame_no = int(getattr(win, "_video_export_frame_index", 0) or 0)
+            if frame_no <= 0:
+                frame_no = self._video_last_frame_no + 1
+            self._video_last_frame_no = max(self._video_last_frame_no, frame_no)
+            for row in frame_rows:
+                new_row = dict(row)
+                new_row["帧序号"] = frame_no
+                self._video_detail_rows.append(new_row)
+            self._detail_csv_rows = list(self._video_detail_rows)
+        else:
+            self._video_detail_rows = []
+            self._video_last_frame_no = 0
+            self._detail_csv_rows = frame_rows
+
+        start_meta = start_local.strftime("%Y-%m-%d %H:%M:%S")
+        end_meta = end_local.strftime("%Y-%m-%d %H:%M:%S")
+        if is_stream_source:
+            start_meta = (
+                getattr(win, "_video_export_started_at", "")
+                or getattr(win, "_history_started_at_str", "")
+                or start_meta
+            )
+            end_meta = getattr(win, "_video_export_ended_at", "") or end_meta
+
         self._export_meta = {
             "应用": "Dimension 目标检测系统",
             "主界面页签": main_tab or "—",
-            "结果记录时间": end_local.strftime("%Y-%m-%d %H:%M:%S"),
-            "推算推理开始时间": start_local.strftime("%Y-%m-%d %H:%M:%S"),
-            "推算推理结束时间": end_local.strftime("%Y-%m-%d %H:%M:%S"),
+            "结果记录时间": end_meta,
+            "推算推理开始时间": start_meta,
+            "推算推理结束时间": end_meta,
             "本帧推理耗时_s": round(inf_s, 6),
             "理论推理帧率_FPS": tfps,
             "模型文件路径": model_path or "—",
@@ -2022,12 +2543,16 @@ class DetectionResultWidget(QWidget):
             "置信度最大值": round(cmax, 6),
             "类别分布": class_summary_str,
             "备注": (
+                "流任务导出为逐帧累计明细（含帧序号，含无目标帧）；开始/结束时间为本次任务时间。"
+                if is_stream_source else
                 "推算推理起止时间：由本机收到该帧结果的时刻与引擎返回的本帧推理耗时反推，"
                 "用于时间轴对照；非 GPU 硬件级精确计时。"
             ),
         }
 
-        if hasattr(win, "export_detail_btn"):
+        if hasattr(win, "_sync_export_detail_button_state"):
+            win._sync_export_detail_button_state(True)
+        elif hasattr(win, "export_detail_btn"):
             win.export_detail_btn.setEnabled(True)
         self._sync_result_table_column_widths()
 
@@ -2463,6 +2988,111 @@ class StyleManager:
                 color: #94a3b8;
             }
 
+            /* 任务预设行：默认白底；悬停时靛色渐变（图标由代码切换为白色） */
+            QToolButton#presetNewIconBtn {
+                background: #ffffff;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+                padding: 0px;
+                min-width: 32px;
+                max-width: 32px;
+                min-height: 32px;
+                max-height: 32px;
+            }
+            QToolButton#presetNewIconBtn:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #a5b4fc, stop:1 #818cf8);
+                border: none;
+            }
+            QToolButton#presetNewIconBtn:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #6366f1, stop:1 #4f46e5);
+                border: none;
+            }
+            QToolButton#presetNewIconBtn:disabled {
+                background: #e2e8f0;
+                border: 1px solid #e2e8f0;
+            }
+
+            QToolButton#presetSaveIconBtn {
+                background: #ffffff;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+                padding: 0px;
+                min-width: 32px;
+                max-width: 32px;
+                min-height: 32px;
+                max-height: 32px;
+            }
+            QToolButton#presetSaveIconBtn:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #a5b4fc, stop:1 #818cf8);
+                border: none;
+            }
+            QToolButton#presetSaveIconBtn:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #6366f1, stop:1 #4f46e5);
+                border: none;
+            }
+            QToolButton#presetSaveIconBtn:disabled {
+                background: #e2e8f0;
+                border-color: #e2e8f0;
+            }
+
+            QToolButton#presetDeleteBtn {
+                background: #ffffff;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+                padding: 0px;
+                min-width: 32px;
+                max-width: 32px;
+                min-height: 32px;
+                max-height: 32px;
+            }
+            QToolButton#presetDeleteBtn:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #a5b4fc, stop:1 #818cf8);
+                border: none;
+            }
+            QToolButton#presetDeleteBtn:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #6366f1, stop:1 #4f46e5);
+                border: none;
+            }
+            QToolButton#presetDeleteBtn:disabled {
+                background: #e2e8f0;
+                border-color: #e2e8f0;
+            }
+
+            /* 高级模型：默认白底靛字，悬停渐变底白字（与任务预设小按钮一致） */
+            QPushButton#advancedModelBtn {
+                background: #ffffff;
+                border: 1px solid #e2e8f0;
+                border-radius: 10px;
+                color: #6366f1;
+                font-size: 12px;
+                font-weight: 600;
+                padding: 4px 10px;
+                min-height: 32px;
+            }
+            QPushButton#advancedModelBtn:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #a5b4fc, stop:1 #818cf8);
+                border: none;
+                color: #ffffff;
+            }
+            QPushButton#advancedModelBtn:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #6366f1, stop:1 #4f46e5);
+                border: none;
+                color: #ffffff;
+            }
+            QPushButton#advancedModelBtn:disabled {
+                background: #e2e8f0;
+                color: #94a3b8;
+                border: 1px solid #e2e8f0;
+            }
+
             QSlider#confThresholdSlider::groove:horizontal {
                 border: 1px solid #e2e8f0;
                 height: 8px;
@@ -2826,7 +3456,6 @@ class StyleManager:
                 border-top: none;
                 border-radius: 0 0 10px 10px;
                 background: #ffffff;
-                gridline-color: #cbd5e1;
                 font-size: 13px;
                 color: #0f172a;
                 alternate-background-color: #f8fafc;
@@ -2834,6 +3463,7 @@ class StyleManager:
             QTableWidget#wfResultTable::item {
                 padding: 8px 10px;
                 border: none;
+                border-bottom: 1px solid #eef2f7;
                 outline: none;
             }
             QTableWidget#wfResultTable::item:focus {
@@ -2854,23 +3484,26 @@ class StyleManager:
                 font-size: 12px;
                 font-weight: 600;
                 border: none;
-                border-right: 1px solid #e2e8f0;
                 border-bottom: 1px solid #e2e8f0;
             }
 
             QTableWidget#wfHistoryTable {
-                border: 1px solid #e2e8f0;
-                border-radius: 10px;
+                border: 1px solid #dbe3ef;
+                border-radius: 12px;
                 background: #ffffff;
-                gridline-color: #cbd5e1;
-                font-size: 13px;
+                gridline-color: #e9eef5;
+                font-size: 12px;
                 color: #0f172a;
-                alternate-background-color: #f8fafc;
+                alternate-background-color: #fbfdff;
             }
             QTableWidget#wfHistoryTable::item {
-                padding: 6px 10px;
+                padding: 7px 10px;
                 border: none;
+                border-bottom: 1px solid #eef2f7;
                 outline: none;
+            }
+            QTableWidget#wfHistoryTable::item:hover {
+                background: #f5f8ff;
             }
             QTableWidget#wfHistoryTable::item:focus {
                 outline: none;
@@ -2880,18 +3513,73 @@ class StyleManager:
                 outline: none;
             }
             QTableWidget#wfHistoryTable::item:selected {
-                background: rgba(99, 102, 241, 0.12);
+                background: rgba(99, 102, 241, 0.14);
                 color: #0f172a;
             }
             QTableWidget#wfHistoryTable QHeaderView::section {
+                background: #f6f8fc;
+                color: #334155;
+                padding: 9px 8px;
+                font-size: 12px;
+                font-weight: 700;
+                border: none;
+                border-right: 1px solid #e6edf6;
+                border-bottom: 1px solid #dbe3ef;
+            }
+            QScrollArea#wfHistoryTableScroll {
+                border: 1px solid #dbe3ef;
+                border-radius: 12px;
+                background: #ffffff;
+            }
+            QScrollArea#wfHistoryTableScroll > QWidget > QWidget {
+                background: #ffffff;
+            }
+            QScrollArea#wfHistoryTableScroll QScrollBar:horizontal {
+                height: 10px;
                 background: #f1f5f9;
+                border-radius: 5px;
+                margin: 4px 8px 6px 8px;
+            }
+            QScrollArea#wfHistoryTableScroll QScrollBar::handle:horizontal {
+                background: #c7d2fe;
+                min-width: 56px;
+                border-radius: 5px;
+            }
+            QScrollArea#wfHistoryTableScroll QScrollBar::handle:horizontal:hover {
+                background: #a5b4fc;
+            }
+            QScrollArea#wfHistoryTableScroll QScrollBar::add-line:horizontal,
+            QScrollArea#wfHistoryTableScroll QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+            QScrollArea#wfHistoryTableScroll QScrollBar::add-page:horizontal,
+            QScrollArea#wfHistoryTableScroll QScrollBar::sub-page:horizontal {
+                background: transparent;
+            }
+            QPushButton#pageNumBtn {
+                min-width: 30px;
+                max-width: 34px;
+                min-height: 30px;
+                border: none;
+                border-radius: 4px;
+                background: transparent;
                 color: #475569;
-                padding: 8px 8px;
                 font-size: 12px;
                 font-weight: 600;
-                border: none;
-                border-right: 1px solid #e2e8f0;
-                border-bottom: 1px solid #e2e8f0;
+                padding: 0px 6px;
+            }
+            QPushButton#pageNumBtn:hover {
+                background: #eef2ff;
+                color: #334155;
+            }
+            QPushButton#pageNumBtn[activePage="true"] {
+                background: #2563eb;
+                color: #ffffff;
+                font-weight: 700;
+            }
+            QSpinBox {
+                font-size: 13px;
+                padding: 2px 8px;
             }
             QLineEdit#historyPathCellEdit {
                 min-height: 0px;
@@ -3694,6 +4382,8 @@ class DetectionThread(QThread):
     status_changed = Signal(str)
     error_occurred = Signal(str)
     fps_updated = Signal(float)
+    # 视频：已处理帧数、总帧数、剩余秒数(按视频帧率估)、平均处理FPS(墙钟)
+    video_time_hint = Signal(int, int, float, float)
     finished = Signal()
 
     def __init__(self, model, source_type, source_path=None, camera_id=0, confidence_threshold=0.25):
@@ -3763,11 +4453,13 @@ class DetectionThread(QThread):
             return
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        vid_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
         frame_count = 0
         class_names = list(self.model.names.values())
 
         self.status_changed.emit(f"开始处理视频 (共{total_frames}帧)...")
 
+        video_t0 = time.time()
         while cap.isOpened() and self.is_running:
             if self.is_paused:
                 time.sleep(0.1)
@@ -3777,31 +4469,46 @@ class DetectionThread(QThread):
             if not ret:
                 break
 
-            start_time = time.time()
+            infer_t0 = time.time()
             results = self.model(
                 frame, conf=self.confidence_threshold, verbose=False)
-            end_time = time.time()
+            infer_t1 = time.time()
+            infer_s = infer_t1 - infer_t0
 
             original_img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             result_img = results[0].plot()
             result_img = cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB)
 
-            self.result_ready.emit(
-                original_img, result_img, end_time - start_time, results, class_names)
-
             frame_count += 1
+            wall_elapsed = time.time() - video_t0
+            proc_fps = frame_count / max(wall_elapsed, 1e-6)
+
+            self.result_ready.emit(
+                original_img, result_img, infer_s, results, class_names)
+
             if total_frames > 0:
                 progress = int((frame_count / total_frames) * 100)
                 self.progress_updated.emit(progress)
+                left = max(0, total_frames - frame_count)
+                if vid_fps > 1e-3:
+                    rem_s = left / vid_fps
+                else:
+                    rem_s = left * max(infer_s, 1e-6)
+                self.video_time_hint.emit(
+                    frame_count, total_frames, rem_s, proc_fps)
+            else:
+                self.video_time_hint.emit(frame_count, 0, 0.0, proc_fps)
 
-            # 更新FPS
-            self._update_fps()
+            # 视频文件：不调用 _update_fps（避免用单帧推理速度冒充整段处理速度）
 
             # 状态更新（每30帧更新一次）
             if frame_count % 30 == 0:
-                current_fps = self._get_current_fps()
-                self.status_changed.emit(
-                    f"处理中... {frame_count}/{total_frames} 帧 (FPS: {current_fps:.1f})")
+                if total_frames > 0:
+                    self.status_changed.emit(
+                        f"处理中... {frame_count}/{total_frames} 帧 (平均 {proc_fps:.1f} FPS)")
+                else:
+                    self.status_changed.emit(
+                        f"处理中... 已处理 {frame_count} 帧 (平均 {proc_fps:.1f} FPS)")
 
             time.sleep(0.033)  # 约30fps
 
@@ -3904,6 +4611,17 @@ class EnhancedDetectionUI(QMainWindow):
         self.current_batch_index = 0
         self._history_batch_mode = False
         self._history_last_snapshot = None
+        self._history_run_start_mono = None
+        self._history_pending_stop_reason = None
+        self._history_last_error = ""
+        self._history_run_sum_infer_s = 0.0
+        self._history_video_frames_done = 0
+        self._history_video_frames_total = 0
+        self._history_started_at_str = ""
+        self._video_export_started_at = ""
+        self._video_export_ended_at = ""
+        self._video_export_frame_index = 0
+        self._tab_sync_source_change = False
         self.preset_data = {}
         self._delete_confirm_target = None
         self.task_preset_file = base_dir / "task_presets.json"
@@ -3921,6 +4639,8 @@ class EnhancedDetectionUI(QMainWindow):
         # 实时预览最后一帧（用于窗口缩放时按等比例重绘）
         self._last_preview_original = None
         self._last_preview_result = None
+        self._last_realtime_overlay_ctx = None
+        self._video_time_overlay = None  # (cur,tot,rem_sec,avg_proc_fps)|None
         self._current_file_full_path = None
         self.init_ui()
         self.setWindowIcon(self.create_enhanced_icon())
@@ -3975,7 +4695,7 @@ class EnhancedDetectionUI(QMainWindow):
             corner = self.tab_widget.cornerWidget(Qt.Corner.TopRightCorner)
             if corner is not None:
                 corner.setMinimumHeight(corner_h)
-        # 顶部运行按钮宽度与「新建预设」一致，保证上下视觉统一
+        # 顶部运行按钮宽度参考预设区控件，保证上下视觉统一
         preset_btn = getattr(self, "new_preset_btn", None)
         if preset_btn is not None:
             preset_w = preset_btn.sizeHint().width()
@@ -4072,19 +4792,15 @@ class EnhancedDetectionUI(QMainWindow):
         center = self._build_main_workspace()
         wrap_layout.addWidget(center, 1)
 
-        self.bottom_drawer = QTabWidget()
-        self.bottom_drawer.setObjectName("bottomDrawer")
-        btb = self.bottom_drawer.tabBar()
-        btb.setObjectName("bottomDrawerTabBar")
+        self.realtime_detail_panel = QFrame()
+        self.realtime_detail_panel.setObjectName("bottomDrawer")
+        panel_layout = QVBoxLayout(self.realtime_detail_panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(0)
         self.log_text.setFont(StyleManager.log_mono_font(10))
+        panel_layout.addWidget(self.result_detail_widget)
 
-        self.bottom_drawer.addTab(self.result_detail_widget, "检测明细")
-        q_tab = QLabel("批处理队列与任务编排将显示在此处。")
-        q_tab.setAlignment(Qt.AlignCenter)
-        q_tab.setObjectName("wfPlaceholder")
-        self.bottom_drawer.addTab(q_tab, "批处理队列")
-
-        self._main_left_column_layout.addWidget(self.bottom_drawer, 0)
+        self._main_left_column_layout.addWidget(self.realtime_detail_panel, 0)
         self.tab_widget.currentChanged.connect(self._on_main_tab_changed)
         self._on_main_tab_changed(self.tab_widget.currentIndex())
 
@@ -4102,22 +4818,31 @@ class EnhancedDetectionUI(QMainWindow):
         self._update_current_file_display()
 
     def _on_main_tab_changed(self, index: int):
-        """仅「实时检测」显示底部检测明细/批处理队列；其它主 Tab 占满主画布。"""
-        if hasattr(self, "bottom_drawer"):
-            self.bottom_drawer.setVisible(index == 0)
+        """文件检测/批量分析共用底部检测明细；其它主 Tab 占满主画布。"""
+        if hasattr(self, "realtime_detail_panel"):
+            self.realtime_detail_panel.setVisible(index in (0, 1))
         self._sync_source_options_for_tab(index)
+        # 避免“文件检测”实时结果串到“批量分析”页签：切页时按当前页语义重绘底部明细。
+        if index == 1 and hasattr(self, "result_detail_widget"):
+            if getattr(self, "batch_results", None):
+                idx = int(getattr(self, "current_batch_index", 0) or 0)
+                idx = max(0, min(idx, len(self.batch_results) - 1))
+                self.current_batch_index = idx
+                self.show_batch_result(idx)
+            else:
+                self.result_detail_widget.update_results(None, [], 0.0)
 
     def _sync_source_options_for_tab(self, tab_index: int):
         """让右侧输入源选项与主 Tab 语义一致，避免双导航冲突。"""
         if not hasattr(self, "source_combo"):
             return
         tab_source_map = {
-            0: ["单张图片", "视频文件", "摄像头"],  # 实时检测
+            0: ["单张图片", "视频文件"],       # 文件检测（摄像头仅在设备监控 Tab）
             1: ["文件夹批量"],                  # 批量分析
             2: ["摄像头"],                      # 设备监控
-            3: ["单张图片", "视频文件", "摄像头"],  # 历史任务（与实时一致，避免侧栏状态错乱）
+            3: ["单张图片", "视频文件"],       # 历史任务（与文件检测侧栏一致）
         }
-        allowed = tab_source_map.get(tab_index, ["单张图片", "视频文件", "摄像头"])
+        allowed = tab_source_map.get(tab_index, ["单张图片", "视频文件"])
         previous = self.source_combo.currentText()
         self.source_combo.blockSignals(True)
         self.source_combo.clear()
@@ -4125,8 +4850,13 @@ class EnhancedDetectionUI(QMainWindow):
         self.source_combo.blockSignals(False)
         target = previous if previous in allowed else allowed[0]
         self.source_combo.setCurrentText(target)
-        # 强制同步内部 source_type，避免下拉文本与实际选择逻辑不一致
-        self.on_source_changed(target)
+        # 强制同步内部 source_type，避免下拉文本与实际选择逻辑不一致。
+        # 主 Tab 切换引发的同步不应清空文件检测画面/路径状态。
+        self._tab_sync_source_change = True
+        try:
+            self.on_source_changed(target)
+        finally:
+            self._tab_sync_source_change = False
         # 仅当有多个可选输入源时显示「模式」行；单一模式时隐藏以减少冗余
         if hasattr(self, "source_mode_row"):
             self.source_mode_row.setVisible(len(allowed) > 1)
@@ -4460,12 +5190,16 @@ class EnhancedDetectionUI(QMainWindow):
         self.init_model_combo()
         r_model.addWidget(self.model_combo, 1)
         self.advanced_model_btn = QPushButton("高级")
-        self._set_btn_icon(self.advanced_model_btn, "settings", "#ffffff")
+        self.advanced_model_btn.setObjectName("advancedModelBtn")
+        self._set_btn_icon_keep_color(
+            self.advanced_model_btn, "settings", "#6366f1", 16)
         self.advanced_model_btn.clicked.connect(
             self.show_model_selection_dialog)
         self.advanced_model_btn.setFixedWidth(90)
         self.advanced_model_btn.setMinimumHeight(32)
-        self.advanced_model_btn.setProperty("variant", "skyPrimary")
+        self.advanced_model_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.advanced_model_btn.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.advanced_model_btn.installEventFilter(self)
         r_model.addWidget(self.advanced_model_btn)
         tb.addLayout(r_model)
 
@@ -4512,8 +5246,7 @@ class EnhancedDetectionUI(QMainWindow):
         self.source_combo = QComboBox()
         self.source_combo.setMinimumWidth(88)
         self.source_combo.setMinimumHeight(32)
-        self.source_combo.addItems(
-            ["单张图片", "视频文件", "摄像头", "文件夹批量"])
+        self.source_combo.addItems(["单张图片", "视频文件"])
         self.source_combo.currentTextChanged.connect(self.on_source_changed)
         r2_mode.addWidget(self.source_combo, 1)
         self.select_file_btn = QPushButton("浏览…")
@@ -4522,7 +5255,8 @@ class EnhancedDetectionUI(QMainWindow):
         self.select_file_btn.setObjectName("toolBtn")
         self.select_file_btn.setMinimumHeight(34)
         self.select_file_btn.setMinimumWidth(80)
-        self.select_file_btn.setToolTip("根据上方模式选择图片、视频、文件夹或批量目录")
+        self.select_file_btn.setToolTip(
+            "根据模式选择图片、视频或批量目录；摄像头仅在「设备监控」页选择")
         s2.addWidget(self.source_mode_row)
 
         self.camera_bar = QWidget()
@@ -4616,47 +5350,53 @@ class EnhancedDetectionUI(QMainWindow):
         self.preset_combo.currentTextChanged.connect(
             self.on_preset_selection_changed)
         r_pre_top.addWidget(self.preset_combo, 1)
-        ob.addLayout(r_pre_top)
-        r_pre_btn = QHBoxLayout()
-        r_pre_btn.setSpacing(8)
-        r_pre_btn.setContentsMargins(0, 0, 0, 0)
-        self.new_preset_btn = QPushButton("新建预设")
+        preset_icon_row = QHBoxLayout()
+        preset_icon_row.setSpacing(4)
+        preset_icon_row.setContentsMargins(0, 0, 0, 0)
+        self.new_preset_btn = QToolButton()
+        self.new_preset_btn.setObjectName("presetNewIconBtn")
+        self.new_preset_btn.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.new_preset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._set_btn_icon_keep_color(
-            self.new_preset_btn, "folder_plus", "#ffffff", 16)
+            self.new_preset_btn, "folder_plus", "#6366f1", 16)
         self.new_preset_btn.clicked.connect(self.create_new_preset)
-        self.new_preset_btn.setProperty("variant", "skyPrimary")
-        self.new_preset_btn.setMinimumHeight(34)
-        self.new_preset_btn.setMinimumWidth(0)
-        self.new_preset_btn.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.new_preset_btn.setToolTip("基于当前配置创建一个新任务预设")
-        r_pre_btn.addWidget(self.new_preset_btn, 1)
-        self.save_preset_btn = QPushButton("修改预设")
+        self.new_preset_btn.setFixedSize(32, 32)
+        self.new_preset_btn.setToolTip("新建预设：基于当前配置创建一个新任务预设")
+        preset_icon_row.addWidget(self.new_preset_btn)
+        self.save_preset_btn = QToolButton()
+        self.save_preset_btn.setObjectName("presetSaveIconBtn")
+        self.save_preset_btn.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.save_preset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._set_btn_icon_keep_color(
             self.save_preset_btn, "save", "#6366f1", 16)
         self.save_preset_btn.clicked.connect(self.save_current_preset)
         self.save_preset_btn.setEnabled(False)
-        self.save_preset_btn.setProperty("variant", "secondary")
-        self.save_preset_btn.setMinimumHeight(34)
-        self.save_preset_btn.setMinimumWidth(0)
-        self.save_preset_btn.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.save_preset_btn.setToolTip("将当前配置保存到已选预设")
-        r_pre_btn.addWidget(self.save_preset_btn, 1)
-        self.delete_preset_btn = QPushButton("删除预设")
+        self.save_preset_btn.setFixedSize(32, 32)
+        self.save_preset_btn.setToolTip("修改预设：将当前配置保存到已选预设")
+        preset_icon_row.addWidget(self.save_preset_btn)
+        self.delete_preset_btn = QToolButton()
         self.delete_preset_btn.setObjectName("presetDeleteBtn")
+        self.delete_preset_btn.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.delete_preset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._set_btn_icon_keep_color(
             self.delete_preset_btn, "trash", "#6366f1", 16)
         self.delete_preset_btn.clicked.connect(self.delete_selected_preset)
         self.delete_preset_btn.setEnabled(False)
-        self.delete_preset_btn.setProperty("variant", "secondary")
-        self.delete_preset_btn.setMinimumHeight(34)
-        self.delete_preset_btn.setMinimumWidth(0)
-        self.delete_preset_btn.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.delete_preset_btn.setToolTip("删除当前选中的任务预设")
-        r_pre_btn.addWidget(self.delete_preset_btn, 1)
-        ob.addLayout(r_pre_btn)
+        self.delete_preset_btn.setFixedSize(32, 32)
+        self.delete_preset_btn.setToolTip("删除预设：删除当前选中的任务预设")
+        preset_icon_row.addWidget(self.delete_preset_btn)
+        r_pre_top.addLayout(preset_icon_row)
+        ob.addLayout(r_pre_top)
+        for _pb in (
+                self.new_preset_btn,
+                self.save_preset_btn,
+                self.delete_preset_btn,
+        ):
+            _pb.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+            _pb.installEventFilter(self)
 
         mode_row = QHBoxLayout()
         align_row(mode_row)
@@ -4728,41 +5468,27 @@ class EnhancedDetectionUI(QMainWindow):
         self.overview_outdir_btn.clicked.connect(self.select_save_directory)
         out_row.addWidget(self.overview_outdir_btn, 0)
         ob.addLayout(out_row)
-        metric_grid = QGridLayout()
-        metric_grid.setContentsMargins(0, 4, 0, 0)
-        metric_grid.setHorizontalSpacing(8)
-        metric_grid.setVerticalSpacing(8)
+        # 全局叠加开关：文件检测与批量分析共用
+        overlay_row = QHBoxLayout()
+        overlay_row.setContentsMargins(0, 2, 0, 0)
+        overlay_row.setSpacing(8)
+        overlay_row.addWidget(self._toolbar_label("图上指标", 64))
+        self.overlay_metrics_check = QCheckBox("显示")
+        self.overlay_metrics_check.setChecked(True)
+        self.overlay_metrics_check.setToolTip(
+            "在结果图上显示指标（不显示路径）；视频时含按视频帧率估算的剩余时间")
+        self.overlay_metrics_check.toggled.connect(
+            self._on_overlay_toggle_changed)
+        overlay_row.addWidget(self.overlay_metrics_check, 0)
+        overlay_row.addStretch(1)
+        ob.addLayout(overlay_row)
 
-        def metric_card(title: str):
-            card = QFrame()
-            card.setObjectName("overviewMetricCard")
-            lay = QVBoxLayout(card)
-            lay.setContentsMargins(10, 8, 10, 8)
-            lay.setSpacing(4)
-            t = QLabel(title)
-            t.setObjectName("overviewMetricTitle")
-            v = QLabel("—")
-            v.setObjectName("overviewMetricValue")
-            lay.addWidget(t)
-            lay.addWidget(v)
-            return card, v
-
-        obj_card, self.overview_objects_value = metric_card("目标数")
-        fps_card, self.overview_fps_value = metric_card("FPS")
-        lat_card, self.overview_latency_value = metric_card("推理耗时")
-        model_card, self.overview_model_metric_value = metric_card("当前模型")
-        metric_grid.addWidget(obj_card, 0, 0)
-        metric_grid.addWidget(fps_card, 0, 1)
-        metric_grid.addWidget(lat_card, 1, 0)
-        metric_grid.addWidget(model_card, 1, 1)
-        ob.addLayout(metric_grid)
-
-        # 将状态同步映射到右侧指标卡（替代顶部指标条）
+        # 右侧指标卡取消后，将内部状态映射到隐藏状态标签，维持内部逻辑一致。
         self._wf_stat_labels = {
-            "objects": self.overview_objects_value,
-            "fps": self.overview_fps_value,
-            "latency": self.overview_latency_value,
-            "model": self.overview_model_metric_value,
+            "objects": self._status_objects,
+            "fps": self._status_fps,
+            "latency": self._status_latency,
+            "model": self._status_model,
         }
 
         ov_btns = QHBoxLayout()
@@ -5012,8 +5738,9 @@ class EnhancedDetectionUI(QMainWindow):
                     self.overview_outdir_edit.blockSignals(False)
                 if hasattr(self, "overview_outdir_btn"):
                     self.overview_outdir_btn.setEnabled(True)
-            self.overview_model_metric_value.setText(model_text or "-")
-            self.overview_model_metric_value.setToolTip(model_text or "-")
+            if hasattr(self, "overview_model_metric_value"):
+                self.overview_model_metric_value.setText(model_text or "-")
+                self.overview_model_metric_value.setToolTip(model_text or "-")
         except Exception:
             pass
 
@@ -5041,24 +5768,32 @@ class EnhancedDetectionUI(QMainWindow):
             return "设备监控"
         st = getattr(self, "current_source_type", "") or ""
         return {
-            "image": "实时 · 图片",
-            "video": "实时 · 视频",
-            "camera": "实时 · 摄像头",
-        }.get(st, st or "实时检测")
+            "image": "文件 · 图片",
+            "video": "文件 · 视频",
+            "camera": "设备监控 · 摄像头",
+        }.get(st, st or "文件检测")
 
     def _history_source_summary(self) -> str:
-        if not hasattr(self, "current_file_label"):
-            return "-"
-        t = (self.current_file_label.toolTip() or "").strip() or (
-            self.current_file_label.text() or "").strip()
+        # 优先使用当前任务真实来源路径（含从预设读取的 source_path），避免受界面显示文本影响
+        st = getattr(self, "current_source_type", "") or ""
+        if st == "camera":
+            cam_text = self.camera_combo.currentText() if hasattr(
+                self, "camera_combo") else ""
+            return cam_text.strip() or "摄像头"
+        t = (getattr(self, "current_source_path", None) or "").strip()
+        if not t:
+            t = (getattr(self, "_current_file_full_path", None) or "").strip()
+        if not t and hasattr(self, "current_file_label"):
+            t = (self.current_file_label.toolTip() or "").strip() or (
+                self.current_file_label.text() or "").strip()
         if len(t) > 96:
             return t[:44] + "…" + t[-44:]
         return t or "-"
 
     def _update_history_snapshot(self, results, class_names, inference_time):
-        """更新「实时任务」结束时写入历史表用的快照（每帧覆盖，停止时落盘一条）。"""
+        """更新写入历史表用的快照（视频每帧覆盖；停止时在 _flush 中补全状态与墙钟耗时）。"""
         object_count = 0
-        note = ""
+        class_note = ""
         if results and results[0].boxes is not None and len(results[0].boxes) > 0:
             object_count = len(results[0].boxes)
             classes = results[0].boxes.cls.cpu().numpy().astype(int)
@@ -5067,7 +5802,7 @@ class EnhancedDetectionUI(QMainWindow):
                 cname = class_names[cls] if cls < len(
                     class_names) else f"类别{cls}"
                 class_counts[cname] = class_counts.get(cname, 0) + 1
-            note = ", ".join(
+            class_note = ", ".join(
                 [f"{n}:{c}" for n, c in class_counts.items()])
         model = self.model_combo.currentText() if hasattr(
             self, "model_combo") else "-"
@@ -5078,17 +5813,99 @@ class EnhancedDetectionUI(QMainWindow):
             "model": model,
             "objects": object_count,
             "inference_s": float(inference_time),
-            "note": note[:160],
+            "note": class_note[:160],
         }
 
     def _flush_history_task_snapshot(self):
-        """将最近一次实时检测快照写入历史表（批量模式不写）。"""
+        """将文件检测快照写入历史表：补充结束状态、结束时间、墙钟耗时与视频进度。"""
         if getattr(self, "_history_batch_mode", False):
             return
         snap = getattr(self, "_history_last_snapshot", None)
         if not snap or not hasattr(self, "task_history_widget"):
             return
-        self.task_history_widget.add_record(**snap)
+        wall_s = 0.0
+        if self._history_run_start_mono is not None:
+            wall_s = max(0.0, time.monotonic() - self._history_run_start_mono)
+        else:
+            wall_s = float(snap.get("inference_s") or 0.0)
+
+        reason = self._history_pending_stop_reason
+        st = getattr(self, "current_source_type", "") or ""
+        if reason is None:
+            if st == "image":
+                reason = "completed"
+            elif st == "video":
+                tot = int(self._history_video_frames_total)
+                cur = int(self._history_video_frames_done)
+                if tot > 0:
+                    reason = "completed" if cur >= tot else "incomplete"
+                else:
+                    reason = "completed"
+            else:
+                reason = "completed"
+
+        reason_cn = {
+            "completed": "检测已完成",
+            "user_stop": "用户手动停止",
+            "error": "检测异常结束",
+            "incomplete": "检测未完成",
+        }.get(reason, str(reason))
+
+        end_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        parts = []
+        sum_inf = float(self._history_run_sum_infer_s or 0.0)
+        if reason in ("error", "incomplete"):
+            if st == "video" and self._history_video_frames_total > 0:
+                parts.append(
+                    f"帧进度 {self._history_video_frames_done}/"
+                    f"{self._history_video_frames_total}")
+            if sum_inf > 0:
+                parts.append(f"累计推理 {sum_inf:.2f}s")
+        if reason == "error" and self._history_last_error:
+            parts.append(self._history_last_error[:200])
+        cls_note = (snap.get("note") or "").strip()
+        if cls_note:
+            parts.append(cls_note)
+
+        snap["note"] = " ； ".join(parts)[:650] if parts else "—"
+        snap["inference_s"] = wall_s
+        snap["time_str"] = end_ts
+
+        if st == "image":
+            fd, ft = 1, 1
+        elif st == "video":
+            fd = int(self._history_video_frames_done)
+            ft = int(self._history_video_frames_total)
+        else:
+            fd = int(self._history_video_frames_done)
+            ft = int(self._history_video_frames_total)
+        if wall_s > 1e-9:
+            if st == "video" and fd > 0:
+                avg_fps = fd / wall_s
+            elif st == "image":
+                avg_fps = 1.0 / wall_s
+            elif fd > 0:
+                avg_fps = fd / wall_s
+            else:
+                avg_fps = 0.0
+        else:
+            avg_fps = 0.0
+
+        self.task_history_widget.add_record(
+            time_str=end_ts,
+            task_type=snap["task_type"],
+            source=snap["source"],
+            model=snap["model"],
+            objects=int(snap["objects"]),
+            inference_s=wall_s,
+            note=snap["note"],
+            started_at=getattr(self, "_history_started_at_str", "") or "",
+            det_status=reason_cn,
+            avg_proc_fps=float(avg_fps),
+            frames_done=fd,
+            frames_total=ft,
+            sum_infer_s=sum_inf,
+        )
         self._history_last_snapshot = None
 
     def _build_main_workspace(self):
@@ -5113,7 +5930,7 @@ class EnhancedDetectionUI(QMainWindow):
         self.monitor_tab = MonitoringWidget(
             self.model_manager, self.camera_manager)
         self.tab_widget.addTab(
-            realtime_tab, ThemeIcons.icon("radio", 17, "#0ea5e9"), "实时检测")
+            realtime_tab, ThemeIcons.icon("radio", 17, "#0ea5e9"), "文件检测")
         self.tab_widget.addTab(
             batch_tab, ThemeIcons.icon("folders", 17, "#0ea5e9"), "批量分析")
         self.tab_widget.addTab(
@@ -5152,7 +5969,7 @@ class EnhancedDetectionUI(QMainWindow):
         return row
 
     def create_realtime_tab(self):
-        """创建实时检测标签页"""
+        """创建文件检测标签页（单张图片 / 视频文件）。"""
         widget = QWidget()
         layout_top = QVBoxLayout(widget)
         layout_top.setContentsMargins(0, 0, 0, 0)
@@ -5173,7 +5990,8 @@ class EnhancedDetectionUI(QMainWindow):
         original_layout.addWidget(
             self._panel_title_row("源画面", "image"))
 
-        self.original_label = QLabel("暂无输入源\n请选择图片、视频或摄像头以开始预览")
+        self.original_label = QLabel(
+            "暂无输入源\n请选择图片或视频；摄像头请使用「设备监控」页")
         self.original_label.setObjectName("previewPlaceholder")
         self.original_label.setAlignment(Qt.AlignCenter)
         self.original_label.setMinimumSize(240, 180)
@@ -5293,6 +6111,8 @@ class EnhancedDetectionUI(QMainWindow):
         self.batch_info_label.setTextFormat(Qt.RichText)
         self.batch_info_label.setWordWrap(True)
         self.batch_info_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        # 与批量明细表、右侧指标和图上叠加信息重复，默认隐藏。
+        self.batch_info_label.setVisible(False)
         layout.addWidget(self.batch_info_label)
 
         return widget
@@ -5434,10 +6254,12 @@ class EnhancedDetectionUI(QMainWindow):
             self.current_file_title_label.setText(
                 title_map.get(self.current_source_type, "当前文件"))
 
-        self.current_source_path = None
-        self._current_file_full_path = None
-        self._update_current_file_display()
-        self.clear_display_windows()
+        is_tab_sync = bool(getattr(self, "_tab_sync_source_change", False))
+        if not is_tab_sync:
+            self.current_source_path = None
+            self._current_file_full_path = None
+            self._update_current_file_display()
+            self.clear_display_windows()
         self.update_button_states()
         self._status_mode.setText(source_text)
         if self.current_source_type == "camera":
@@ -5535,11 +6357,8 @@ class EnhancedDetectionUI(QMainWindow):
         # 切换预设或失去有效选择时，退出“确认删除”状态
         if not has_valid_selection or self._delete_confirm_target != current_name:
             self._delete_confirm_target = None
-            self.delete_preset_btn.setText("删除预设")
-            self.delete_preset_btn.setToolTip("删除当前选中的任务预设")
-            self.delete_preset_btn.setStyleSheet("")
-            self._set_btn_icon_keep_color(
-                self.delete_preset_btn, "trash", "#6366f1", 16)
+            self.delete_preset_btn.setToolTip("删除预设：删除当前选中的任务预设")
+            self._reset_delete_preset_btn_surface_after_confirm()
 
     def create_new_preset(self):
         """快速新建预设"""
@@ -5634,6 +6453,8 @@ class EnhancedDetectionUI(QMainWindow):
         if hasattr(self, "tab_widget"):
             if source_type == "batch":
                 self.tab_widget.setCurrentIndex(1)
+            elif source_type == "camera":
+                self.tab_widget.setCurrentIndex(2)
             elif source_type in ("image", "video"):
                 self.tab_widget.setCurrentIndex(0)
         source_label = self._source_type_to_label(source_type)
@@ -5690,25 +6511,53 @@ class EnhancedDetectionUI(QMainWindow):
         # 二次确认：首次点击进入确认态，二次点击执行删除
         if self._delete_confirm_target != preset_name:
             self._delete_confirm_target = preset_name
-            self.delete_preset_btn.setText("确认删除")
-            self.delete_preset_btn.setToolTip(f"再次点击删除预设「{preset_name}」")
+            self.delete_preset_btn.setToolTip(
+                f"确认删除：再次点击将删除预设「{preset_name}」")
             self._set_btn_icon_keep_color(
                 self.delete_preset_btn, "trash", "#ffffff", 16)
             self.delete_preset_btn.setStyleSheet(
-                "background:#dc2626;color:#ffffff;border:1px solid #b91c1c;border-radius:12px;"
+                "QToolButton#presetDeleteBtn { background:#dc2626; color:#ffffff; "
+                "border:1px solid #b91c1c; border-radius:8px; padding:0px; }"
+                "QToolButton#presetDeleteBtn:hover { background:#b91c1c; "
+                "border-color:#991b1b; }"
             )
             return
 
         self.preset_data.pop(preset_name, None)
         if self._write_task_presets_to_file():
             self._delete_confirm_target = None
-            self.delete_preset_btn.setText("删除预设")
-            self.delete_preset_btn.setToolTip("删除当前选中的任务预设")
-            self.delete_preset_btn.setStyleSheet("")
-            self._set_btn_icon_keep_color(
-                self.delete_preset_btn, "trash", "#6366f1", 16)
+            self.delete_preset_btn.setToolTip("删除预设：删除当前选中的任务预设")
+            self._reset_delete_preset_btn_surface_after_confirm()
             self._refresh_preset_combo()
             self.log_message(f"任务预设已删除: {preset_name}")
+
+    def _apply_preset_tool_icon_for_toolbar_hover(
+            self, btn, icon_name: str, hovered: bool):
+        """预设行图标按钮：白底时为靛色图标，悬停渐变底时为白色图标。"""
+        if btn is getattr(self, "delete_preset_btn", None) and getattr(
+                self, "_delete_confirm_target", None):
+            self._set_btn_icon_keep_color(btn, "trash", "#ffffff", 16)
+            return
+        color = "#ffffff" if hovered else "#6366f1"
+        self._set_btn_icon_keep_color(btn, icon_name, color, 16)
+
+    def _apply_advanced_model_btn_icon_hover(self, hovered: bool):
+        btn = getattr(self, "advanced_model_btn", None)
+        if btn is None or not btn.isEnabled():
+            return
+        c = "#ffffff" if hovered else "#6366f1"
+        self._set_btn_icon_keep_color(btn, "settings", c, 16)
+
+    def _reset_delete_preset_btn_surface_after_confirm(self):
+        """清除确认删除的红底样式，并按是否仍悬停恢复图标颜色。"""
+        btn = getattr(self, "delete_preset_btn", None)
+        if btn is None:
+            return
+        btn.setStyleSheet("")
+        if btn.underMouse():
+            self._apply_preset_tool_icon_for_toolbar_hover(btn, "trash", True)
+        else:
+            self._set_btn_icon_keep_color(btn, "trash", "#6366f1", 16)
 
     def _reset_history_path_cells_on_outside_click(self, global_pos):
         """点击路径框外部时，恢复历史来源路径的默认显示。"""
@@ -5716,7 +6565,7 @@ class EnhancedDetectionUI(QMainWindow):
         tb = getattr(thw, "table", None)
         if tb is None:
             return
-        source_col = getattr(thw, "_SOURCE_COL", 7)
+        source_col = getattr(thw, "_SOURCE_COL", 12)
         for r in range(tb.rowCount()):
             src_edit = tb.cellWidget(r, source_col)
             if not isinstance(src_edit, PathCellLineEdit):
@@ -5728,6 +6577,23 @@ class EnhancedDetectionUI(QMainWindow):
     def eventFilter(self, obj, event):
         """当处于“确认删除”状态时，点击其它区域会自动取消高亮。"""
         try:
+            if event.type() in (QEvent.HoverEnter, QEvent.HoverLeave):
+                hovered = event.type() == QEvent.HoverEnter
+                np = getattr(self, "new_preset_btn", None)
+                sp = getattr(self, "save_preset_btn", None)
+                dp = getattr(self, "delete_preset_btn", None)
+                if obj is np and np is not None:
+                    self._apply_preset_tool_icon_for_toolbar_hover(
+                        np, "folder_plus", hovered)
+                elif obj is sp and sp is not None:
+                    self._apply_preset_tool_icon_for_toolbar_hover(
+                        sp, "save", hovered)
+                elif obj is dp and dp is not None:
+                    self._apply_preset_tool_icon_for_toolbar_hover(
+                        dp, "trash", hovered)
+                adv = getattr(self, "advanced_model_btn", None)
+                if obj is adv and adv is not None:
+                    self._apply_advanced_model_btn_icon_hover(hovered)
             if event.type() == QEvent.MouseButtonPress:
                 global_pos = event.globalPos()
                 # 历史来源路径：应用内点击路径框外部时恢复默认展示。
@@ -5752,11 +6618,9 @@ class EnhancedDetectionUI(QMainWindow):
                 if not self.delete_preset_btn.rect().contains(btn_pos):
                     # 点击在删除按钮之外：还原为普通状态
                     self._delete_confirm_target = None
-                    self.delete_preset_btn.setText("删除预设")
-                    self.delete_preset_btn.setToolTip("删除当前选中的任务预设")
-                    self.delete_preset_btn.setStyleSheet("")
-                    self._set_btn_icon_keep_color(
-                        self.delete_preset_btn, "trash", "#6366f1", 16)
+                    self.delete_preset_btn.setToolTip(
+                        "删除预设：删除当前选中的任务预设")
+                    self._reset_delete_preset_btn_surface_after_confirm()
         except Exception:
             pass
 
@@ -5855,11 +6719,27 @@ class EnhancedDetectionUI(QMainWindow):
         """开始单个检测"""
         self._history_last_snapshot = None
         self._history_batch_mode = False
+        self._history_pending_stop_reason = None
+        self._history_last_error = ""
+        self._history_run_sum_infer_s = 0.0
+        self._history_video_frames_done = 0
+        self._history_video_frames_total = 0
+        self._history_run_start_mono = time.monotonic()
+        self._history_started_at_str = datetime.now().strftime(
+            "%Y-%m-%d %H:%M:%S")
+        self._video_export_frame_index = 0
+        if self.current_source_type in ("video", "camera"):
+            self._video_export_started_at = self._history_started_at_str
+        else:
+            self._video_export_started_at = ""
+        self._video_export_ended_at = ""
+        self._video_time_overlay = None
         camera_id = 0
         if self.current_source_type == "camera":
             camera_id = self.camera_combo.currentData()
             if camera_id == -1:
                 self.log_message("错误: 没有可用的摄像头")
+                self._history_run_start_mono = None
                 return
 
         self.detection_thread = DetectionThread(
@@ -5870,12 +6750,15 @@ class EnhancedDetectionUI(QMainWindow):
             self._on_main_progress)
         self.detection_thread.status_changed.connect(
             self.statusBar().showMessage)
-        self.detection_thread.error_occurred.connect(self.log_message)
+        self.detection_thread.error_occurred.connect(
+            self._on_detection_thread_error)
         self.detection_thread.finished.connect(self.on_detection_finished)
         self.detection_thread.fps_updated.connect(self._on_fps_updated)
+        self.detection_thread.video_time_hint.connect(
+            self._on_video_time_hint)
 
         self.update_detection_ui_state(True)
-        self.tab_widget.setCurrentIndex(0)  # 切换到实时检测
+        self.tab_widget.setCurrentIndex(0)  # 切换到文件检测
 
         self.detection_thread.start()
         self.log_message(f"开始{self.current_source_type}检测…")
@@ -5913,7 +6796,30 @@ class EnhancedDetectionUI(QMainWindow):
         self.select_file_btn.setEnabled(
             not detecting and not is_monitor_tab and self.current_source_type != "camera")
         self.model_combo.setEnabled(not detecting)
+        self._sync_export_detail_button_state()
         self._update_header_pills()
+
+    def _sync_export_detail_button_state(self, has_detail: bool | None = None):
+        """导出明细按钮状态同步：视频检测进行中禁用，结束后按是否有明细决定。"""
+        btn = getattr(self, "export_detail_btn", None)
+        if btn is None:
+            return
+        dt = getattr(self, "detection_thread", None)
+        video_running = bool(
+            getattr(self, "current_source_type", None) == "video"
+            and dt is not None
+            and getattr(dt, "is_running", False)
+        )
+        if video_running:
+            btn.setEnabled(False)
+            btn.setToolTip("视频检测进行中，请结束或停止后导出检测明细")
+            return
+        if has_detail is None:
+            rdw = getattr(self, "result_detail_widget", None)
+            rows = getattr(rdw, "_detail_csv_rows", None)
+            has_detail = bool(rows)
+        btn.setEnabled(bool(has_detail))
+        btn.setToolTip("选择导出格式：CSV / JSON / 文本 / Excel（含汇总指标与目标明细）")
 
     def pause_detection(self):
         """暂停/恢复检测"""
@@ -5955,6 +6861,7 @@ class EnhancedDetectionUI(QMainWindow):
             return
 
         if self.detection_thread and self.detection_thread.is_running:
+            self._history_pending_stop_reason = "user_stop"
             self.detection_thread.stop()
             self.detection_thread.wait()
 
@@ -5964,26 +6871,69 @@ class EnhancedDetectionUI(QMainWindow):
 
         self.on_detection_finished()
 
+    def _history_ensure_snapshot_for_error(self):
+        """出错时尚未产生任何结果帧时补一条空快照，便于历史表落盘。"""
+        if getattr(self, "_history_last_snapshot", None) is not None:
+            return
+        if getattr(self, "_history_run_start_mono", None) is None:
+            return
+        model = self.model_combo.currentText() if hasattr(
+            self, "model_combo") else "-"
+        self._history_last_snapshot = {
+            "time_str": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "task_type": self._history_task_type_label(),
+            "source": self._history_source_summary(),
+            "model": model,
+            "objects": 0,
+            "inference_s": 0.0,
+            "note": "",
+        }
+
+    def _on_detection_thread_error(self, msg: str):
+        self._history_pending_stop_reason = "error"
+        self._history_last_error = (str(msg) or "").strip()[:400]
+        self._history_ensure_snapshot_for_error()
+        self.log_message(str(msg))
+
     def on_detection_result(self, original_img, result_img, inference_time, results, class_names):
         """检测结果回调"""
+        is_file_tab = bool(
+            getattr(self, "tab_widget", None) is not None
+            and self.tab_widget.currentIndex() == 0
+        )
+        if getattr(self, "current_source_type", None) in ("video", "camera"):
+            self._video_export_frame_index += 1
+            self._video_export_ended_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            self._history_run_sum_infer_s += float(inference_time)
+        except Exception:
+            pass
         if original_img is not None:
             self._last_preview_original = np.ascontiguousarray(original_img)
         if result_img is not None:
             self._last_preview_result = np.ascontiguousarray(result_img)
+        self._last_realtime_overlay_ctx = {
+            "results": results,
+            "class_names": class_names,
+            "inference_time": inference_time,
+        }
         # 显示图像
         self.display_image(original_img, self.original_label)
-        self.display_image(result_img, self.result_label)
+        self.display_image(
+            self._render_realtime_overlay_image(result_img), self.result_label)
 
-        # 更新结果详情
-        self.result_detail_widget.update_results(
-            results, class_names, inference_time)
+        # 仅在“文件检测”主 Tab 下刷新共享明细，避免串到批量模式
+        if is_file_tab:
+            self.result_detail_widget.update_results(
+                results, class_names, inference_time)
         self._refresh_wireframe_sidebar(results, class_names, inference_time)
 
         # 记录日志（简化版，避免过多输出）
         if results and results[0].boxes and len(results[0].boxes) > 0:
             object_count = len(results[0].boxes)
-            self._status_objects.setText(str(object_count))
-            self._status_latency.setText(f"{inference_time*1000:.0f} 毫秒")
+            if is_file_tab:
+                self._status_objects.setText(str(object_count))
+                self._status_latency.setText(f"{inference_time*1000:.0f} 毫秒")
 
             # 统计类别
             classes = results[0].boxes.cls.cpu().numpy().astype(int)
@@ -5999,8 +6949,9 @@ class EnhancedDetectionUI(QMainWindow):
                 f"检测到 {object_count} 个目标: {class_summary}（耗时 {inference_time:.3f} 秒）")
         else:
             self.log_message(f"未检测到目标（耗时 {inference_time:.3f} 秒）")
-            self._status_objects.setText("0")
-            self._status_latency.setText(f"{inference_time*1000:.0f} 毫秒")
+            if is_file_tab:
+                self._status_objects.setText("0")
+                self._status_latency.setText(f"{inference_time*1000:.0f} 毫秒")
 
         self._update_history_snapshot(
             results, class_names, inference_time)
@@ -6011,6 +6962,43 @@ class EnhancedDetectionUI(QMainWindow):
         except Exception:
             self._status_fps.setText("-")
         self._sync_wireframe_overview_from_status()
+
+    @staticmethod
+    def _format_video_remaining_cn(sec: float) -> str:
+        if sec <= 0:
+            return "即将完成"
+        if sec >= 3600 * 24:
+            return "剩余 —"
+        total = int(round(sec))
+        h, rem = divmod(total, 3600)
+        m, s = divmod(rem, 60)
+        if h > 0:
+            return f"剩余约 {h}:{m:02d}:{s:02d}"
+        return f"剩余约 {m}:{s:02d}"
+
+    def _on_video_time_hint(self, cur: int, total: int, rem_s: float, proc_fps: float):
+        self._video_time_overlay = (
+            int(cur), int(total), float(rem_s), float(proc_fps))
+        self._history_video_frames_done = int(cur)
+        self._history_video_frames_total = int(total)
+        try:
+            if getattr(self, "current_source_type", None) == "video":
+                self._status_fps.setText(f"{float(proc_fps):.1f}")
+                self._sync_wireframe_overview_from_status()
+        except Exception:
+            pass
+        if getattr(self, "tab_widget", None) is None:
+            return
+        if self.tab_widget.currentIndex() != 0:
+            return
+        if getattr(self, "current_source_type", None) != "video":
+            return
+        if self._last_preview_result is None or not self._is_overlay_enabled():
+            return
+        self.display_image(
+            self._render_realtime_overlay_image(self._last_preview_result),
+            self.result_label,
+        )
 
     def on_batch_result(self, file_path, original_img, result_img, inference_time, results, class_names):
         """批量检测结果回调"""
@@ -6031,8 +7019,8 @@ class EnhancedDetectionUI(QMainWindow):
 
         self.batch_results.append(result_data)
 
-        # 显示第一个结果
-        if len(self.batch_results) == 1:
+        # 仅在“批量分析”主 Tab 下显示首个批量结果，避免覆盖文件检测明细
+        if len(self.batch_results) == 1 and getattr(self, "tab_widget", None) is not None and self.tab_widget.currentIndex() == 1:
             self.current_batch_index = 0
             self.show_batch_result(0)
 
@@ -6057,10 +7045,12 @@ class EnhancedDetectionUI(QMainWindow):
                           for r in self.batch_results)
             avg_inf = sum_inf / total_count
             src = (self.current_source_path or "").strip() or "-"
-            if len(src) > 96:
-                src = src[:44] + "…" + src[-44:]
+            ended = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            avg_fps = (
+                float(total_count) / max(float(sum_inf), 1e-9)
+                if total_count > 0 else 0.0)
             self.task_history_widget.add_record(
-                time_str=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                time_str=ended,
                 task_type="批量分析",
                 source=src,
                 model=self.model_combo.currentText() if hasattr(
@@ -6068,6 +7058,12 @@ class EnhancedDetectionUI(QMainWindow):
                 objects=total_objects,
                 inference_s=round(sum_inf, 4),
                 note=f"共 {total_count} 张 · 均 {avg_inf:.4f}s/张",
+                started_at="",
+                det_status="检测已完成",
+                avg_proc_fps=avg_fps,
+                frames_done=total_count,
+                frames_total=total_count,
+                sum_infer_s=float(sum_inf),
             )
 
         self.log_message(
@@ -6081,12 +7077,147 @@ class EnhancedDetectionUI(QMainWindow):
         self.on_detection_finished(completed=True)
         self._history_batch_mode = False
 
+    def _is_overlay_enabled(self) -> bool:
+        return not hasattr(self, "overlay_metrics_check") or self.overlay_metrics_check.isChecked()
+
+    def _render_overlay_image(self, base_img, line1: str, line2: str | None = None):
+        if base_img is None or not self._is_overlay_enabled():
+            return base_img
+        rgb = np.ascontiguousarray(base_img.copy())
+        if rgb.ndim != 3 or rgb.shape[2] != 3:
+            return base_img
+        h, w = rgb.shape[:2]
+        margin_x, margin_y = 14, 18
+        pad_x, pad_y = 14, 12
+        line_gap = 8
+        top_lead = 3
+        font_size = int(max(13, min(21, w / 50.0)))
+        font = _load_overlay_cjk_font(font_size)
+
+        lines: list[str] = [line1.strip()] if line1 else []
+        if line2 and str(line2).strip():
+            lines.append(str(line2).strip())
+        if not lines:
+            return base_img
+
+        pil_base = Image.fromarray(rgb, mode="RGB").convert("RGBA")
+        layer = Image.new("RGBA", pil_base.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(layer)
+        dummy = ImageDraw.Draw(Image.new("RGB", (max(w, 4), max(h, 4))))
+
+        max_text_w = max(80, w - margin_x * 2 - pad_x * 2)
+        fitted: list[str] = []
+        for raw in lines:
+            fitted.append(_fit_overlay_line_text(raw, font, dummy, max_text_w))
+
+        bbs = [dummy.textbbox((0, 0), t, font=font) for t in fitted]
+        text_heights = [b[3] - b[1] for b in bbs]
+        text_block_h = sum(text_heights) + line_gap * max(0, len(fitted) - 1)
+        box_inner_w = max(b[2] - b[0] for b in bbs)
+        box_w = min(w - margin_x * 2, box_inner_w + pad_x * 2)
+        box_h = pad_y * 2 + top_lead + text_block_h
+        x1 = max(margin_x, (w - box_w) // 2)
+        y1 = margin_y
+        x2 = min(w - margin_x, x1 + box_w)
+        y2 = min(h - margin_y, y1 + box_h)
+        rad = int(max(8, min(16, font_size)))
+
+        fill = (30, 41, 59, 118)
+        outline = (129, 140, 248, 140)
+        draw.rounded_rectangle(
+            [x1, y1, x2, y2], radius=rad, fill=fill, outline=outline, width=1)
+
+        y_cursor = y1 + pad_y + top_lead
+        for i, t in enumerate(fitted):
+            bb0 = dummy.textbbox((0, 0), t, font=font)
+            line_w = bb0[2] - bb0[0]
+            tx = x1 + (box_w - line_w) // 2
+            bb = draw.textbbox((tx, y_cursor), t, font=font)
+            if bb[1] < y1 + 2:
+                y_cursor += y1 + 2 - bb[1]
+                bb = draw.textbbox((tx, y_cursor), t, font=font)
+            col = (248, 250, 252, 255) if i == 0 else (199, 210, 254, 255)
+            draw.text((tx, y_cursor), t, font=font, fill=col)
+            y_cursor = bb[3] + line_gap
+
+        out = Image.alpha_composite(pil_base, layer)
+        return np.ascontiguousarray(np.asarray(out.convert("RGB")))
+
+    def _render_batch_overlay_image(self, result: dict):
+        """按需在批量结果图上叠加简要指标信息（不显示路径/文件名）。"""
+        object_count = int(result.get("object_count", 0))
+        infer_s = float(result.get("inference_time", 0.0))
+        fps = (1.0 / infer_s) if infer_s > 1e-9 else 0.0
+        line1 = (
+            f"目标 {object_count}  ·  耗时 {infer_s * 1000:.1f} ms  ·  {fps:.1f} FPS")
+        return self._render_overlay_image(result.get("result_img"), line1, None)
+
+    def _render_realtime_overlay_image(self, result_img):
+        ctx = self._last_realtime_overlay_ctx or {}
+        infer_s = float(ctx.get("inference_time", 0.0) or 0.0)
+        inst_fps = (1.0 / infer_s) if infer_s > 1e-9 else 0.0
+        results = ctx.get("results")
+        object_count = 0
+        if results and results[0].boxes is not None:
+            object_count = len(results[0].boxes)
+        if getattr(self, "current_source_type", None) == "video":
+            vt = getattr(self, "_video_time_overlay", None)
+            proc_fps = float(vt[3]) if vt is not None and len(vt) >= 4 else 0.0
+            if proc_fps > 1e-6:
+                line1 = (
+                    f"目标 {object_count}  ·  本帧 {infer_s * 1000:.1f} ms"
+                    f"  ·  平均 {proc_fps:.1f} FPS")
+            else:
+                line1 = (
+                    f"目标 {object_count}  ·  本帧 {infer_s * 1000:.1f} ms"
+                    f"  ·  本帧 {inst_fps:.1f} FPS")
+        else:
+            line1 = (
+                f"目标 {object_count}  ·  耗时 {infer_s * 1000:.1f} ms"
+                f"  ·  {inst_fps:.1f} FPS")
+        line2 = None
+        if getattr(self, "current_source_type", None) == "video":
+            vt = getattr(self, "_video_time_overlay", None)
+            if vt is not None:
+                cur, tot, rem = vt[0], vt[1], vt[2]
+                if tot > 0:
+                    line2 = (
+                        f"进度 {cur}/{tot}  ·  {self._format_video_remaining_cn(rem)}")
+                elif cur > 0:
+                    line2 = f"已处理 {cur} 帧"
+        return self._render_overlay_image(result_img, line1, line2)
+
+    def _on_overlay_toggle_changed(self, _checked: bool):
+        """切换图上指标显示时，刷新当前预览画面。"""
+        if getattr(self, "tab_widget", None) is None:
+            return
+        idx = self.tab_widget.currentIndex()
+        if idx == 0 and self._last_preview_result is not None:
+            self.display_image(
+                self._render_realtime_overlay_image(self._last_preview_result),
+                self.result_label,
+            )
+        elif idx == 1 and self.batch_results:
+            self.show_batch_result(self.current_batch_index)
+
     def on_detection_finished(self, completed=False):
         """检测完成回调"""
+        self._video_time_overlay = None
+        if getattr(self, "current_source_type", None) in ("video", "camera"):
+            if not self._video_export_ended_at:
+                self._video_export_ended_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
             self._flush_history_task_snapshot()
         except Exception:
             pass
+        finally:
+            self._history_run_start_mono = None
+            self._history_pending_stop_reason = None
+            self._history_last_error = ""
+            self._history_run_sum_infer_s = 0.0
+            self._history_video_frames_done = 0
+            self._history_video_frames_total = 0
+            self._history_started_at_str = ""
         if completed or self.progress_bar.value() >= 100:
             self.progress_bar.setValue(100)
             self._set_progress_state("done")
@@ -6107,36 +7238,23 @@ class EnhancedDetectionUI(QMainWindow):
 
             self.display_image(result['original_img'],
                                self.batch_original_label)
-            self.display_image(result['result_img'], self.batch_result_label)
+            self.display_image(
+                self._render_batch_overlay_image(result), self.batch_result_label)
 
-            filename = Path(result['file_path']).name
-            object_count = result['object_count']
-            inference_time = result['inference_time']
+            # 批量与文件检测共用同一个检测明细组件：仅在批量主 Tab 下更新，防止串页
+            if hasattr(self, "result_detail_widget") and getattr(self, "tab_widget", None) is not None and self.tab_widget.currentIndex() == 1:
+                self.result_detail_widget.update_results(
+                    result['results'], result['class_names'], result['inference_time'])
+            # 右侧指标卡同步当前批量结果
+            self._status_objects.setText(str(result['object_count']))
+            self._status_latency.setText(
+                f"{result['inference_time']*1000:.0f} 毫秒")
+            if result['inference_time'] > 1e-9:
+                self._status_fps.setText(f"{1.0/result['inference_time']:.2f}")
+            else:
+                self._status_fps.setText("-")
+            self._sync_wireframe_overview_from_status()
 
-            info_lines = []
-            info_lines.append(f"<b>文件</b>：{filename}")
-            info_lines.append(f"<b>检测目标</b>：{object_count} 个")
-            info_lines.append(f"<b>推理耗时</b>：{inference_time:.3f} 秒")
-
-            if result['results'] and result['results'][0].boxes and len(result['results'][0].boxes) > 0:
-                # 显示类别统计
-                classes = result['results'][0].boxes.cls.cpu(
-                ).numpy().astype(int)
-                confidences = result['results'][0].boxes.conf.cpu().numpy()
-
-                class_counts = {}
-                for cls in classes:
-                    class_name = result['class_names'][cls] if cls < len(
-                        result['class_names']) else f"类别{cls}"
-                    class_counts[class_name] = class_counts.get(
-                        class_name, 0) + 1
-
-                class_summary = ", ".join(
-                    [f"{name}:{count}" for name, count in class_counts.items()])
-                info_lines.append(f"<b>类别统计</b>：{class_summary}")
-                info_lines.append(f"<b>平均置信度</b>：{np.mean(confidences):.3f}")
-
-            self.batch_info_label.setText("<br/>".join(info_lines))
             self.result_index_label.setText(
                 f"{index + 1}/{len(self.batch_results)}")
 
@@ -6168,8 +7286,13 @@ class EnhancedDetectionUI(QMainWindow):
         self.batch_original_label.clear()
         self.batch_result_label.setText("结果预览\n检测完成后显示")
         self.batch_original_label.setText("原图预览\n选择文件夹后运行检测")
-        self.batch_info_label.setText("选择文件夹开始批量检测。")
         self.result_index_label.setText("0/0")
+        if hasattr(self, "result_detail_widget"):
+            self.result_detail_widget.update_results(None, [], 0.0)
+        self._status_objects.setText("-")
+        self._status_fps.setText("-")
+        self._status_latency.setText("-")
+        self._sync_wireframe_overview_from_status()
         self.save_results_btn.setEnabled(False)
         self.next_result_btn.setEnabled(False)
         self.prev_result_btn.setEnabled(False)
@@ -6214,46 +7337,106 @@ class EnhancedDetectionUI(QMainWindow):
             self.log_message(f"保存失败: {str(e)}")
 
     def save_detection_report(self, result_dir):
-        """保存检测报告"""
-        report_path = result_dir / "detection_report.txt"
+        """批量保存时导出“检测明细”同款数据（CSV/JSON）。"""
+        export_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        total_images = len(self.batch_results)
+        total_objects = sum(int(r.get("object_count", 0))
+                            for r in self.batch_results)
+        total_infer_s = sum(float(r.get("inference_time", 0.0))
+                            for r in self.batch_results)
+        avg_infer_s = (total_infer_s / total_images) if total_images else 0.0
+        model_name = self.model_combo.currentText() if hasattr(
+            self, "model_combo") else "-"
+        src_folder = self.current_source_path or "-"
 
-        with open(report_path, 'w', encoding='utf-8') as f:
-            f.write("🎯 Enhanced Object Detection System - 批量检测报告\n")
-            f.write("=" * 60 + "\n")
-            f.write(
-                f"📅 处理时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"🎚️ 置信度阈值: {self.confidence_threshold}\n")
-            f.write(f"📂 处理图片数量: {len(self.batch_results)}\n")
-            f.write(
-                f"🎯 总检测目标数: {sum(r['object_count'] for r in self.batch_results)}\n")
-            f.write("\n📊 详细结果:\n")
-            f.write("-" * 60 + "\n")
+        metrics = {
+            "应用": "Dimension 目标检测系统",
+            "主界面页签": "批量分析",
+            "结果记录时间": export_time,
+            "推算推理开始时间": export_time,
+            "推算推理结束时间": export_time,
+            "本帧推理耗时_s": round(avg_infer_s, 6),
+            "理论推理帧率_FPS": round(1.0 / avg_infer_s, 4) if avg_infer_s > 1e-12 else "",
+            "模型文件路径": getattr(self, "_loaded_model_path", "") or "—",
+            "模型名称": model_name or "—",
+            "置信度阈值": getattr(self, "confidence_threshold", 0.25),
+            "输入类型": "文件夹批量",
+            "输入来源": src_folder,
+            "检测目标总数": total_objects,
+            "类别种数": "",
+            "类别统计": "",
+            "平均置信度": "",
+            "置信度最小值": "",
+            "置信度最大值": "",
+            "状态": "批量完成",
+            "设备信息": "",
+            "备注": f"共 {total_images} 张，平均耗时 {avg_infer_s:.4f}s/张",
+        }
 
-            for i, result in enumerate(self.batch_results, 1):
-                f.write(f"{i}. 📁 {Path(result['file_path']).name}\n")
-                f.write(f"   🎯 检测目标: {result['object_count']} 个\n")
-                f.write(f"   ⏱️ 推理耗时: {result['inference_time']:.3f} 秒\n")
+        detail_rows = []
+        row_no = 1
+        for item in self.batch_results:
+            file_name = Path(item.get("file_path", "")).name
+            results = item.get("results")
+            class_names = item.get("class_names", []) or []
+            if not results or not results[0].boxes or len(results[0].boxes) == 0:
+                continue
+            boxes = results[0].boxes
+            confidences = boxes.conf.cpu().numpy()
+            classes = boxes.cls.cpu().numpy().astype(int)
+            xyxy = boxes.xyxy.cpu().numpy()
+            for conf, cls, box in zip(confidences, classes, xyxy):
+                class_name = class_names[cls] if cls < len(
+                    class_names) else f"类别{cls}"
+                bw = box[2] - box[0]
+                bh = box[3] - box[1]
+                area_px = max(0, int(round(bw * bh)))
+                detail_rows.append({
+                    "来源文件": file_name,
+                    "序号": row_no,
+                    "类别": class_name,
+                    "置信度": round(float(conf), 6),
+                    "x1": round(float(box[0]), 2),
+                    "y1": round(float(box[1]), 2),
+                    "x2": round(float(box[2]), 2),
+                    "y2": round(float(box[3]), 2),
+                    "宽": round(float(bw), 2),
+                    "高": round(float(bh), 2),
+                    "面积": area_px,
+                })
+                row_no += 1
 
-                if result['results'] and result['results'][0].boxes and len(result['results'][0].boxes) > 0:
-                    confidences = result['results'][0].boxes.conf.cpu().numpy()
-                    classes = result['results'][0].boxes.cls.cpu(
-                    ).numpy().astype(int)
+        csv_path = result_dir / "detection_detail.csv"
+        with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["【指标项】", "【值】"])
+            w.writerow(["导出时间", export_time])
+            for key in _DETECTION_EXPORT_META_ORDER:
+                if key in metrics:
+                    val = metrics[key]
+                    w.writerow([key, val if val is not None else ""])
+            w.writerow([])
+            w.writerow(["【目标明细】", ""])
+            detail_fields = ["来源文件"] + list(_DETECTION_EXPORT_DETAIL_FIELDS)
+            dw = csv.DictWriter(
+                f, fieldnames=detail_fields, extrasaction="ignore")
+            dw.writeheader()
+            dw.writerows(detail_rows)
 
-                    f.write(
-                        f"   📈 置信度范围: {np.min(confidences):.3f} - {np.max(confidences):.3f}\n")
-
-                    # 类别统计
-                    class_counts = {}
-                    for cls in classes:
-                        class_name = result['class_names'][cls] if cls < len(
-                            result['class_names']) else f"类别{cls}"
-                        class_counts[class_name] = class_counts.get(
-                            class_name, 0) + 1
-
-                    f.write("   📊 类别分布: " + ", ".join(
-                        [f"{name}:{count}" for name, count in class_counts.items()]) + "\n")
-
-                f.write("\n")
+        json_path = result_dir / "detection_detail.json"
+        payload = {
+            "format": "Dimension_batch_detection_export",
+            "version": 1,
+            "export_time_local": export_time,
+            "metrics": {
+                k: metrics[k]
+                for k in _DETECTION_EXPORT_META_ORDER
+                if k in metrics
+            },
+            "detections": detail_rows,
+        }
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
 
     def clear_display_windows(self):
         """清空显示窗口"""
@@ -6261,7 +7444,8 @@ class EnhancedDetectionUI(QMainWindow):
         self._last_preview_result = None
         self.original_label.clear()
         self.result_label.clear()
-        self.original_label.setText("暂无输入源\n请选择图片、视频或摄像头以开始预览")
+        self.original_label.setText(
+            "暂无输入源\n请选择图片或视频；摄像头请使用「设备监控」页")
         self.result_label.setText("暂无结果\n开始检测后将显示框与类别标签")
 
     def display_image(self, img_array, label):
@@ -6289,7 +7473,10 @@ class EnhancedDetectionUI(QMainWindow):
             self.display_image(self._last_preview_original,
                                self.original_label)
         if self._last_preview_result is not None:
-            self.display_image(self._last_preview_result, self.result_label)
+            self.display_image(
+                self._render_realtime_overlay_image(self._last_preview_result),
+                self.result_label,
+            )
 
     def log_message(self, message):
         """添加日志消息（[时:分:秒] 前缀，与标注稿一致）"""
@@ -6347,9 +7534,7 @@ def main():
     window.showMaximized()
 
     # 启动消息
-    window.log_message("Dimension 目标检测系统已启动")
-    window.log_message("支持：实时检测、批量结果、多路监控、任务预设与运行日志")
-
+    window.log_message("Dimension目标检测系统已启动")
     sys.exit(app.exec())
 
 
