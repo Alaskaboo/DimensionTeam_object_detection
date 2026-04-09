@@ -350,6 +350,9 @@ class ModelSelectionDialog(QDialog):
     PATH_COL = 3
     STATUS_COL = 4
     ACTION_COL = 5
+    OP_COL_W = 132
+    OP_ROW_H = 36
+    OP_BTN_H = 24
 
     COLUMN_HEADERS_LOCAL = ["模型名称", "大小", "修改时间", "路径"]
     COLUMN_HEADERS_NETWORK = ["模型名称", "大小(MB)", "修改时间", "类别数量", "状态", "操作"]
@@ -371,11 +374,15 @@ class ModelSelectionDialog(QDialog):
         self.setWindowTitle("高级模型选择")
         self.setModal(True)
         self.resize(900, 700)
+        self.setObjectName("modelSelectionDialog")
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
 
         # 创建标签页
         self.tab_widget = QTabWidget()
+        self.tab_widget.setObjectName("modelSelectTabs")
         self.tab_widget.tabBar().setObjectName("dialogTabBar")
         layout.addWidget(self.tab_widget)
 
@@ -406,23 +413,24 @@ class ModelSelectionDialog(QDialog):
             "官方网络资源模型",
         )
 
-        # 帮助标签页
-        self.help_tab = QWidget()
-        self.setup_help_tab()
-        self.tab_widget.addTab(
-            self.help_tab,
-            ThemeIcons.icon("help", 17, "#6366f1"),
-            "使用帮助",
-        )
-
         # 按钮区域
         button_box = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
+        button_box.setObjectName("modelSelectButtonBox")
+        ok_btn = button_box.button(QDialogButtonBox.Ok)
+        cancel_btn = button_box.button(QDialogButtonBox.Cancel)
+        if ok_btn is not None:
+            ok_btn.setText("应用模型")
+            ok_btn.setProperty("variant", "skyPrimary")
+        if cancel_btn is not None:
+            cancel_btn.setText("取消")
+            cancel_btn.setProperty("variant", "secondary")
         layout.addWidget(button_box)
 
         self.setStyleSheet(StyleManager.get_main_stylesheet(1.0))
+        self._apply_dialog_theme()
 
     def setup_local_tab(self):
         """设置本地模型标签页"""
@@ -430,19 +438,23 @@ class ModelSelectionDialog(QDialog):
 
         # 路径选择组
         path_group = QGroupBox("自定义模型路径")
+        path_group.setObjectName("modelSelectGroup")
         path_layout = QHBoxLayout(path_group)
 
         self.path_edit = QLineEdit()
+        self.path_edit.setObjectName("modelSelectPathEdit")
         self.path_edit.setPlaceholderText("输入自定义模型目录路径...")
         path_layout.addWidget(self.path_edit)
 
         browse_btn = QPushButton("浏览")
+        browse_btn.setProperty("variant", "skyPrimary")
         browse_btn.setIcon(ThemeIcons.icon("folder_open", 18, "#ffffff"))
         browse_btn.setIconSize(QSize(18, 18))
         browse_btn.clicked.connect(self.browse_path)
         path_layout.addWidget(browse_btn)
 
         refresh_btn = QPushButton("刷新")
+        refresh_btn.setProperty("variant", "skyPrimary")
         refresh_btn.setIcon(ThemeIcons.icon("refresh", 18, "#ffffff"))
         refresh_btn.setIconSize(QSize(18, 18))
         refresh_btn.clicked.connect(self.refresh_models)
@@ -452,11 +464,22 @@ class ModelSelectionDialog(QDialog):
 
         # 模型列表组
         models_group = QGroupBox("可用模型")
+        models_group.setObjectName("modelSelectGroup")
         models_layout = QVBoxLayout(models_group)
 
-        self.model_table = self._create_table(self.COLUMN_HEADERS_LOCAL, 4)
+        self.model_table = self._create_table(
+            self.COLUMN_HEADERS_LOCAL, 4, "modelSelectTable")
         self.model_table.doubleClicked.connect(self.accept)
         self.model_table.setMinimumHeight(450)
+        header = self.model_table.horizontalHeader()
+        header.setSectionResizeMode(
+            self.MODEL_NAME_COL, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(
+            self.SIZE_COL, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(
+            self.MODIFIED_COL, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.PATH_COL, QHeaderView.Stretch)
+        self.model_table.setTextElideMode(Qt.ElideMiddle)
         models_layout.addWidget(self.model_table)
 
         layout.addWidget(models_group)
@@ -468,15 +491,18 @@ class ModelSelectionDialog(QDialog):
 
         # 下载路径组
         path_group = QGroupBox("路径设置")
+        path_group.setObjectName("modelSelectGroup")
         path_layout = QHBoxLayout(path_group)
 
         self.download_path_edit = QLineEdit()
+        self.download_path_edit.setObjectName("modelSelectPathEdit")
         self.download_path_edit.setText(
             str((base_dir / "pt_models").absolute()))
         self.download_path_edit.setPlaceholderText("模型下载目录路径...")
         path_layout.addWidget(self.download_path_edit)
 
         browse_download_btn = QPushButton("浏览")
+        browse_download_btn.setProperty("variant", "skyPrimary")
         browse_download_btn.setIcon(
             ThemeIcons.icon("folder_open", 18, "#ffffff"))
         browse_download_btn.setIconSize(QSize(18, 18))
@@ -487,14 +513,28 @@ class ModelSelectionDialog(QDialog):
 
         # 网络模型组
         models_group = QGroupBox("网络模型资源")
+        models_group.setObjectName("modelSelectGroup")
         models_layout = QVBoxLayout(models_group)
 
-        self.network_table = self._create_table(self.COLUMN_HEADERS_NETWORK, 6)
+        self.network_table = self._create_table(
+            self.COLUMN_HEADERS_NETWORK, 6, "modelSelectTable")
         self.network_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.network_table.customContextMenuRequested.connect(
             self.show_network_context_menu)
         self.network_table.doubleClicked.connect(self.show_network_model_info)
         self.network_table.setMinimumHeight(450)
+        n_header = self.network_table.horizontalHeader()
+        n_header.setSectionResizeMode(self.MODEL_NAME_COL, QHeaderView.Stretch)
+        n_header.setSectionResizeMode(
+            self.SIZE_COL, QHeaderView.ResizeToContents)
+        n_header.setSectionResizeMode(
+            self.MODIFIED_COL, QHeaderView.ResizeToContents)
+        n_header.setSectionResizeMode(
+            self.STATUS_COL - 1, QHeaderView.ResizeToContents)
+        n_header.setSectionResizeMode(
+            self.STATUS_COL, QHeaderView.ResizeToContents)
+        n_header.setSectionResizeMode(self.ACTION_COL, QHeaderView.Fixed)
+        self.network_table.setColumnWidth(self.ACTION_COL, self.OP_COL_W)
         models_layout.addWidget(self.network_table)
 
         layout.addWidget(models_group)
@@ -505,15 +545,18 @@ class ModelSelectionDialog(QDialog):
 
         # 下载路径组
         path_group = QGroupBox("路径设置")
+        path_group.setObjectName("modelSelectGroup")
         path_layout = QHBoxLayout(path_group)
 
         self.official_download_path_edit = QLineEdit()
+        self.official_download_path_edit.setObjectName("modelSelectPathEdit")
         self.official_download_path_edit.setText(
             str((base_dir / "YOLO_pt").absolute()))
         self.official_download_path_edit.setPlaceholderText("官方模型下载目录路径...")
         path_layout.addWidget(self.official_download_path_edit)
 
         browse_official_btn = QPushButton("浏览")
+        browse_official_btn.setProperty("variant", "skyPrimary")
         browse_official_btn.setIcon(
             ThemeIcons.icon("folder_open", 18, "#ffffff"))
         browse_official_btn.setIconSize(QSize(18, 18))
@@ -524,266 +567,417 @@ class ModelSelectionDialog(QDialog):
 
         # 官方网络模型组
         models_group = QGroupBox("官方YOLO模型资源")
+        models_group.setObjectName("modelSelectGroup")
         models_layout = QVBoxLayout(models_group)
 
         self.official_network_table = self._create_table(
-            self.COLUMN_HEADERS_OFFICIAL_NETWORK, 6)
+            self.COLUMN_HEADERS_OFFICIAL_NETWORK, 6, "modelSelectTable")
         self.official_network_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.official_network_table.customContextMenuRequested.connect(
             self.show_official_network_context_menu)
         self.official_network_table.doubleClicked.connect(
             self.show_official_network_model_info)
         self.official_network_table.setMinimumHeight(450)
+        o_header = self.official_network_table.horizontalHeader()
+        o_header.setSectionResizeMode(self.MODEL_NAME_COL, QHeaderView.Stretch)
+        o_header.setSectionResizeMode(
+            self.SIZE_COL, QHeaderView.ResizeToContents)
+        o_header.setSectionResizeMode(
+            self.MODIFIED_COL, QHeaderView.ResizeToContents)
+        o_header.setSectionResizeMode(
+            self.STATUS_COL - 1, QHeaderView.ResizeToContents)
+        o_header.setSectionResizeMode(
+            self.STATUS_COL, QHeaderView.ResizeToContents)
+        o_header.setSectionResizeMode(self.ACTION_COL, QHeaderView.Fixed)
+        self.official_network_table.setColumnWidth(
+            self.ACTION_COL, self.OP_COL_W)
         models_layout.addWidget(self.official_network_table)
 
         layout.addWidget(models_group)
 
     def setup_help_tab(self):
         """设置帮助标签页"""
-        layout = QVBoxLayout(self.help_tab)
-        layout.setSpacing(15)
-        layout.setContentsMargins(20, 20, 20, 20)
+        help_host = self.help_tab
+        layout = QVBoxLayout(help_host)
+        layout.setSpacing(6)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        # 标题
-        title_label = QLabel("模型加载使用指南")
-        title_label.setStyleSheet("""
-            font-size: 20px;
-            font-weight: 800;
-            color: #312e81;
-            padding: 10px;
+        section_wrap = QWidget()
+        section_wrap.setObjectName("helpNavStrip")
+        section_wrap.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        section_wrap.setMinimumHeight(56)
+        section_wrap.setMaximumHeight(56)
+        section_row = QHBoxLayout(section_wrap)
+        section_row.setContentsMargins(12, 8, 12, 8)
+        section_row.setSpacing(10)
+        layout.addWidget(section_wrap)
+
+        viewer = QTextEdit()
+        viewer.setReadOnly(True)
+        viewer.setLineWrapMode(QTextEdit.WidgetWidth)
+        viewer.setMinimumHeight(520)
+        viewer.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        viewer.setFont(StyleManager.application_ui_font())
+        viewer.setObjectName("helpMarkdownViewer")
+        viewer.document().setDefaultStyleSheet("""
+            body {
+                font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+                font-size: 14px;
+                line-height: 1.78;
+                color: #0f172a;
+            }
+            h1 {
+                font-size: 34px;
+                font-weight: 700;
+                color: #0f172a;
+                margin: 0 0 10px 0;
+            }
+            h2 {
+                font-size: 27px;
+                font-weight: 700;
+                color: #1e293b;
+                margin: 14px 0 8px 0;
+            }
+            h3 {
+                font-size: 19px;
+                font-weight: 700;
+                color: #334155;
+                margin: 10px 0 6px 0;
+            }
+            p, li {
+                font-size: 14px;
+                color: #0f172a;
+            }
+            ul, ol {
+                margin: 4px 0 8px 18px;
+            }
+            hr {
+                border: none;
+                border-top: 1px solid #dbe3ff;
+                margin: 12px 0;
+            }
+            code {
+                font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+                background: #eef2ff;
+                color: #334155;
+                padding: 1px 4px;
+                border-radius: 5px;
+            }
+            table {
+                border-collapse: collapse;
+                margin: 6px 0 10px 0;
+            }
+            th, td {
+                border: 1px solid #dbe3ff;
+                padding: 5px 8px;
+            }
+            th {
+                background: #eef2ff;
+            }
+            blockquote {
+                border-left: 3px solid #a5b4fc;
+                margin: 8px 0;
+                padding: 4px 10px;
+                color: #334155;
+                background: #f8faff;
+            }
         """)
-        title_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title_label)
+        layout.addWidget(viewer, 1)
 
-        # 创建滚动区域
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_content = QWidget()
-        scroll_layout = QVBoxLayout(scroll_content)
-        scroll_layout.setSpacing(20)
+        def _jump_to_ratio(ratio: float):
+            sb = viewer.verticalScrollBar()
+            ratio = max(0.0, min(1.0, float(ratio)))
+            sb.setValue(int(round(ratio * sb.maximum())))
 
-        # 1. 本地资源模型
-        local_group = QGroupBox("💻 本地资源模型")
-        local_layout = QVBoxLayout(local_group)
-        local_text = QTextEdit()
-        local_text.setReadOnly(True)
-        local_text.setHtml("""
-        <h3 style="color: #3498db;">什么是本地资源模型？</h3>
-        <p>本地资源模型是指您已经下载并存储在计算机上的YOLO模型文件（.pt格式）。</p>
-        
-        <h3 style="color: #3498db;">如何使用？</h3>
-        <ol>
-            <li><b>自动扫描：</b>程序启动时会自动扫描默认目录下的模型文件</li>
-            <li><b>自定义路径：</b>在"自定义模型路径"输入框中输入您的模型所在目录，点击"浏览"按钮选择文件夹</li>
-            <li><b>刷新列表：</b>点击"🔄 刷新"按钮更新模型列表</li>
-            <li><b>选择模型：</b>在表格中单击选中您需要的模型</li>
-            <li><b>确认选择：</b>点击"确定"按钮加载选中的模型</li>
-        </ol>
-        
-        <h3 style="color: #3498db;">支持的模型格式</h3>
-        <ul>
-            <li>YOLOv8 模型 (.pt文件)</li>
-            <li>YOLOv11 模型 (.pt文件)</li>
-            <li>YOLOv26 模型 (.pt文件)</li>
-        </ul>
-        
-        <h3 style="color: #e74c3c;">注意事项</h3>
-        <ul>
-            <li>确保模型文件完整且未损坏</li>
-            <li>模型文件需要有相应的读取权限</li>
-            <li>建议使用官方或可信来源的模型文件</li>
-        </ul>
-        """)
-        local_text.setMaximumHeight(600)
-        local_text.setMinimumHeight(350)
-        local_layout.addWidget(local_text)
-        scroll_layout.addWidget(local_group)
+        class _HelpMiniMap(QPlainTextEdit):
+            def __init__(self, jump_cb, parent=None):
+                super().__init__(parent)
+                self._jump_cb = jump_cb
+                self.setCursor(Qt.PointingHandCursor)
 
-        # 2. 私有网络资源模型
-        network_group = QGroupBox("🌐 私有网络资源模型")
-        network_layout = QVBoxLayout(network_group)
-        network_text = QTextEdit()
-        network_text.setReadOnly(True)
-        network_text.setHtml("""
-        <h3 style="color: #9b59b6;">什么是私有网络资源模型？</h3>
-        <p>私有网络资源模型是指存储在私有服务器或GitHub Releases上的模型文件，
-        您可以直接从网络下载使用，无需预先保存在本地。</p>
-        
-        <h3 style="color: #9b59b6;">如何使用？</h3>
-        <ol>
-            <li><b>设置下载路径：</b>在"📥 路径设置"中指定模型下载保存的位置（默认：pt_models文件夹）</li>
-            <li><b>浏览模型列表：</b>表格中显示了所有可用的网络模型资源，包括：
-                <ul>
-                    <li>模型名称和版本</li>
-                    <li>文件大小</li>
-                    <li>更新日期</li>
-                    <li>支持的类别数量</li>
-                    <li>当前下载状态</li>
-                </ul>
-            </li>
-            <li><b>下载模型：</b>
-                <ul>
-                    <li>点击"📥 下载"按钮下载选中的模型</li>
-                    <li>或右键点击模型行选择"下载模型"</li>
-                    <li>下载过程中状态会显示"下载中..."</li>
-                </ul>
-            </li>
-            <li><b>复制下载链接：</b>点击"🔗 复制"按钮可复制模型的下载链接，用于其他下载工具</li>
-            <li><b>查看详情：</b>双击模型行可查看详细信息，包括所有支持的检测类别</li>
-            <li><b>选择模型：</b>下载完成后，选中模型并点击"确定"按钮加载</li>
-        </ol>
-        
-        <h3 style="color: #9b59b6;">下载状态说明</h3>
-        <ul>
-            <li><span style="color: #e74c3c;">未下载</span> - 模型尚未下载到本地</li>
-            <li><span style="color: #f39c12;">下载中...</span> - 正在从网络下载模型</li>
-            <li><span style="color: #27ae60;">已下载</span> - 模型已存在于本地，可以直接使用</li>
-        </ul>
-        
-        <h3 style="color: #e74c3c;">注意事项</h3>
-        <ul>
-            <li>下载模型需要网络连接</li>
-            <li>模型文件较大，请确保有足够的磁盘空间</li>
-            <li>下载时间取决于网络速度和文件大小</li>
-            <li>如果下载失败，可以复制链接使用其他下载工具</li>
-        </ul>
-        """)
-        network_text.setMaximumHeight(600)
-        network_text.setMinimumHeight(450)
-        network_layout.addWidget(network_text)
-        scroll_layout.addWidget(network_group)
+            def _handle_jump(self, event):
+                h = max(1, self.viewport().height())
+                y = max(0, min(h, int(event.position().y())))
+                self._jump_cb(y / h)
 
-        # 3. 官方网络资源模型
-        official_group = QGroupBox("🏢 官方网络资源模型")
-        official_layout = QVBoxLayout(official_group)
-        official_text = QTextEdit()
-        official_text.setReadOnly(True)
-        official_text.setHtml("""
-        <h3 style="color: #27ae60;">什么是官方网络资源模型？</h3>
-        <p>官方网络资源模型是指由Ultralytics官方发布的YOLO模型，
-        包括YOLOv11系列（n/s/m/l/x）和YOLOv26系列（n/s/m/l）等多种规格，
-        以及支持分割任务的seg版本。</p>
-        
-        <h3 style="color: #27ae60;">模型规格说明</h3>
-        <table border="1" cellpadding="5" style="border-collapse: collapse;">
-            <tr style="background-color: #ecf0f1;">
-                <th>规格</th>
-                <th>说明</th>
-                <th>适用场景</th>
-            </tr>
-            <tr>
-                <td><b>n (nano)</b></td>
-                <td>最轻量级，约5-6MB</td>
-                <td>边缘设备、移动端、实时性要求高的场景</td>
-            </tr>
-            <tr>
-                <td><b>s (small)</b></td>
-                <td>轻量级，约18-20MB</td>
-                <td>平衡速度和精度</td>
-            </tr>
-            <tr>
-                <td><b>m (medium)</b></td>
-                <td>中等，约38-43MB</td>
-                <td>一般桌面应用</td>
-            </tr>
-            <tr>
-                <td><b>l (large)</b></td>
-                <td>大型，约49-54MB</td>
-                <td>精度优先的场景</td>
-            </tr>
-            <tr>
-                <td><b>x (xlarge)</b></td>
-                <td>超大型，约109-119MB</td>
-                <td>最高精度，计算资源充足</td>
-            </tr>
-        </table>
-        
-        <h3 style="color: #27ae60;">如何使用？</h3>
-        <ol>
-            <li><b>设置下载路径：</b>在"📥 路径设置"中指定模型下载保存的位置（默认：YOLO_pt文件夹）</li>
-            <li><b>浏览模型列表：</b>表格中显示了所有官方可用的YOLO模型</li>
-            <li><b>下载模型：</b>
-                <ul>
-                    <li>点击"📥 下载"按钮从Ultralytics官方仓库下载</li>
-                    <li>支持断点续传，如果下载中断可以重新下载</li>
-                </ul>
-            </li>
-            <li><b>复制下载链接：</b>点击"🔗 复制"按钮可复制官方下载链接</li>
-            <li><b>查看详情：</b>双击模型行可查看模型支持的80个COCO数据集类别</li>
-            <li><b>选择模型：</b>下载完成后，选中模型并点击"确定"按钮加载</li>
-        </ol>
-        
-        <h3 style="color: #27ae60;">模型类别信息</h3>
-        <p>所有官方模型都基于COCO数据集训练，支持检测以下80个类别：</p>
-        <p style="font-size: 12px; color: #7f8c8d;">
-        人、自行车、汽车、摩托车、飞机、公交车、火车、卡车、船、红绿灯、消防栓、
-        停车标志、停车计时器、长椅、鸟、猫、狗、马、羊、牛、大象、熊、斑马、长颈鹿、
-        背包、雨伞、手提包、领带、行李箱、飞盘、滑雪板、 snowboard、运动球、风筝、
-        棒球棒、棒球手套、滑板、冲浪板、网球拍、瓶子、酒杯、杯子、叉子、刀、勺子、
-        碗、香蕉、苹果、三明治、橙子、西兰花、胡萝卜、热狗、披萨、甜甜圈、蛋糕、
-        椅子、沙发、盆栽植物、床、餐桌、马桶、电视、笔记本电脑、鼠标、遥控器、
-        键盘、手机、微波炉、烤箱、烤面包机、水槽、冰箱、书、时钟、花瓶、剪刀、
-        泰迪熊、吹风机、牙刷
-        </p>
-        
-        <h3 style="color: #e74c3c;">注意事项</h3>
-        <ul>
-            <li>官方模型需要从GitHub下载，请确保网络可以访问github.com</li>
-            <li>较大的模型（x版本）下载时间较长，请耐心等待</li>
-            <li>seg版本模型支持实例分割任务，文件比普通版本稍大</li>
-            <li>建议根据您的硬件配置选择合适的模型规格</li>
-            <li>首次下载后，模型会缓存在本地，下次使用无需重新下载</li>
-        </ul>
-        """)
-        official_text.setMaximumHeight(600)
-        official_text.setMinimumHeight(450)
-        official_layout.addWidget(official_text)
-        scroll_layout.addWidget(official_group)
+            def mousePressEvent(self, event):
+                if event.button() == Qt.LeftButton:
+                    self._handle_jump(event)
+                super().mousePressEvent(event)
 
-        # 通用提示
-        tips_group = QGroupBox("💡 通用提示")
-        tips_layout = QVBoxLayout(tips_group)
-        tips_text = QTextEdit()
-        tips_text.setReadOnly(True)
-        tips_text.setHtml("""
-        <h3 style="color: #f39c12;">快速开始建议</h3>
-        <ol>
-            <li><b>新手推荐：</b>如果您是第一次使用，建议从"官方网络资源模型"中下载YOLOv11n.pt（最小最快）</li>
-            <li><b>精度优先：</b>如果需要更高的检测精度，可以选择YOLOv11x.pt或YOLOv26l.pt</li>
-            <li><b>已有模型：</b>如果您已经有下载好的模型文件，使用"本地资源模型"直接加载</li>
-            <li><b>网络不好：</b>如果网络下载慢，可以复制链接使用下载工具，然后放到对应目录使用本地加载</li>
-        </ol>
-        
-        <h3 style="color: #f39c12;">常见问题</h3>
-        <ul>
-            <li><b>Q: 下载失败怎么办？</b><br>
-            A: 检查网络连接，或复制链接使用其他下载工具手动下载后放到对应目录。</li>
-            <li><b>Q: 模型加载失败？</b><br>
-            A: 确保模型文件完整，尝试重新下载或使用其他模型。</li>
-            <li><b>Q: 如何选择模型规格？</b><br>
-            A: 根据您的硬件配置选择，配置低选n/s，配置高选l/x。</li>
-            <li><b>Q: seg版本和普通版本有什么区别？</b><br>
-            A: seg版本支持实例分割（像素级物体轮廓），普通版本只支持目标检测（矩形框）。</li>
-        </ul>
-        """)
-        tips_text.setMaximumHeight(280)
-        tips_text.setMinimumHeight(200)
-        tips_layout.addWidget(tips_text)
-        scroll_layout.addWidget(tips_group)
+            def mouseMoveEvent(self, event):
+                if event.buttons() & Qt.LeftButton:
+                    self._handle_jump(event)
+                super().mouseMoveEvent(event)
 
-        scroll_layout.addStretch()
-        scroll_area.setWidget(scroll_content)
-        layout.addWidget(scroll_area)
+            def wheelEvent(self, event):
+                event.ignore()
 
-    def _create_table(self, headers, column_count):
+        mini_map = _HelpMiniMap(_jump_to_ratio, viewer)
+        mini_map.setObjectName("helpMiniMap")
+        mini_map.setReadOnly(True)
+        mini_map.setWordWrapMode(QTextOption.NoWrap)
+        mini_map.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        mini_map.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        mini_map.setFixedSize(132, 168)
+        fmini = QFont("Cascadia Mono", 6)
+        fmini.setStyleHint(QFont.Monospace)
+        mini_map.setFont(fmini)
+        mini_map.raise_()
+        help_host._help_md_viewer = viewer
+        help_host._help_section_row = section_row
+        help_host._help_mini_map = mini_map
+
+        fixed_nav = ["使用说明", "模型说明", "常见问题", "软件介绍"]
+        nav_icon_map = {
+            "使用说明": "settings",
+            "模型说明": "cpu",
+            "常见问题": "help",
+            "软件介绍": "sparkles",
+        }
+        section_file_map = {
+            "软件介绍": base_dir / "docs" / "help_sections" / "software_intro.md",
+            "使用说明": base_dir / "docs" / "help_sections" / "software_manual.md",
+            "模型说明": base_dir / "docs" / "help_sections" / "model_guide.md",
+            "常见问题": base_dir / "docs" / "help_sections" / "faq.md",
+        }
+
+        def _clear_section_row():
+            while section_row.count():
+                item = section_row.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.deleteLater()
+
+        def _sync_mini_scroll():
+            mini = getattr(help_host, "_help_mini_map", None)
+            if mini is None:
+                return
+            sb_src = viewer.verticalScrollBar()
+            sb_dst = mini.verticalScrollBar()
+            max_src = max(1, sb_src.maximum())
+            max_dst = max(0, sb_dst.maximum())
+            ratio = sb_src.value() / max_src
+            sb_dst.setValue(int(ratio * max_dst))
+
+        def _position_mini_map():
+            mini = getattr(help_host, "_help_mini_map", None)
+            if mini is None:
+                return
+            margin = 10
+            x = max(margin, viewer.width() - mini.width() - margin)
+            y = margin
+            mini.move(x, y)
+            mini.raise_()
+
+        def _set_view_content(sec: str):
+            md_text = help_host._help_section_map.get(sec, "")
+            viewer.setMarkdown(md_text)
+            mini = getattr(help_host, "_help_mini_map", None)
+            if mini is not None:
+                doc = QTextDocument()
+                doc.setMarkdown(md_text)
+                mini.setPlainText(doc.toPlainText())
+                _sync_mini_scroll()
+                _position_mini_map()
+
+        def _render_help(section_map: dict):
+            _clear_section_row()
+
+            current = getattr(help_host, "_help_current_section", "使用说明")
+            if current not in section_map:
+                current = "使用说明"
+            help_host._help_section_map = section_map
+
+            btn_group = QButtonGroup(help_host)
+            btn_group.setExclusive(True)
+            help_host._help_section_btn_group = btn_group
+
+            for title in fixed_nav:
+                btn = QPushButton(title)
+                btn.setObjectName("helpNavBtn")
+                btn.setCheckable(True)
+                btn.setProperty("variant", "secondary")
+                btn.setMinimumHeight(30)
+                icon_name = nav_icon_map.get(title, "file_text")
+                btn.setIcon(ThemeIcons.icon(icon_name, 13, "#6366f1"))
+                btn.setIconSize(QSize(13, 13))
+                btn_group.addButton(btn)
+
+                def _on_click(_checked=False, sec=title):
+                    help_host._help_current_section = sec
+                    _set_view_content(sec)
+
+                btn.clicked.connect(_on_click)
+                section_row.addWidget(btn, 0, Qt.AlignLeft)
+                if title == current:
+                    btn.setChecked(True)
+
+            section_row.addStretch(1)
+            _set_view_content(current)
+            help_host._help_current_section = current
+
+        class _ViewerResizeFilter(QObject):
+            def __init__(self, on_resize, parent=None):
+                super().__init__(parent)
+                self._on_resize = on_resize
+
+            def eventFilter(self, watched, event):
+                if event.type() in (QEvent.Resize, QEvent.Show):
+                    self._on_resize()
+                return False
+
+        viewer.verticalScrollBar().valueChanged.connect(lambda _v: _sync_mini_scroll())
+        viewer.verticalScrollBar().rangeChanged.connect(lambda _a, _b: _sync_mini_scroll())
+        resize_filter = _ViewerResizeFilter(_position_mini_map, help_host)
+        viewer.installEventFilter(resize_filter)
+        help_host._help_mini_resize_filter = resize_filter
+
+        def _reload_help_from_md():
+            section_map = {}
+            for title in fixed_nav:
+                p = section_file_map[title]
+                try:
+                    if p.exists():
+                        section_map[title] = p.read_text(encoding="utf-8")
+                    else:
+                        section_map[title] = f"# {title}\n\n未找到文档：`{p.relative_to(base_dir)}`。"
+                except Exception as e:
+                    section_map[title] = f"# {title}\n\n读取文档失败：\n\n`{e}`"
+            _render_help(section_map)
+
+        help_host._reload_help_from_md = _reload_help_from_md
+        _reload_help_from_md()
+        QTimer.singleShot(0, _position_mini_map)
+
+    def _create_table(self, headers, column_count, object_name="modelSelectTable"):
         """创建标准表格控件"""
         table = QTableWidget()
+        table.setObjectName(object_name)
         table.setColumnCount(column_count)
         table.setHorizontalHeaderLabels(headers)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        vheader = table.verticalHeader()
+        vheader.setSectionResizeMode(QHeaderView.Fixed)
+        vheader.setDefaultSectionSize(self.OP_ROW_H)
+        vheader.setMinimumSectionSize(30)
+        table.setWordWrap(False)
         table.setSelectionBehavior(QTableWidget.SelectRows)
         table.setAlternatingRowColors(True)
         return table
+
+    def _apply_dialog_theme(self):
+        self.setStyleSheet(self.styleSheet() + """
+            QDialog#modelSelectionDialog {
+                background: #f8fafc;
+            }
+            QTabWidget#modelSelectTabs::pane {
+                border: 1px solid #dbe3ff;
+                border-radius: 12px;
+                background: #ffffff;
+                top: -1px;
+            }
+            QTabBar#dialogTabBar::tab {
+                min-height: 34px;
+                min-width: 128px;
+                padding: 7px 14px;
+                margin-right: 4px;
+                border: 1px solid #dbe3ff;
+                border-bottom: none;
+                border-top-left-radius: 10px;
+                border-top-right-radius: 10px;
+                background: #eef2ff;
+                color: #475569;
+                font-weight: 600;
+            }
+            QTabBar#dialogTabBar::tab:selected {
+                color: #312e81;
+                background: #ffffff;
+                border-color: #c7d2fe;
+            }
+            QTabBar#dialogTabBar::tab:hover:!selected {
+                background: #e2e8ff;
+                color: #3730a3;
+            }
+            QGroupBox#modelSelectGroup {
+                border: 1px solid #e2e8f0;
+                border-radius: 12px;
+                margin-top: 12px;
+                padding-top: 10px;
+                font-weight: 600;
+                color: #1e293b;
+                background: #ffffff;
+            }
+            QGroupBox#modelSelectGroup::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px;
+                color: #3730a3;
+            }
+            QLineEdit#modelSelectPathEdit {
+                min-height: 34px;
+                border: 1px solid #cbd5e1;
+                border-radius: 10px;
+                padding: 0 10px;
+                background: #ffffff;
+                color: #0f172a;
+            }
+            QLineEdit#modelSelectPathEdit:focus {
+                border-color: #818cf8;
+                background: #f8faff;
+            }
+            QTableWidget#modelSelectTable {
+                border: 1px solid #dbe3ff;
+                border-radius: 10px;
+                gridline-color: #e2e8f0;
+                background: #ffffff;
+                alternate-background-color: #f8faff;
+                selection-background-color: #e0e7ff;
+                selection-color: #1e1b4b;
+            }
+            QTableWidget#modelSelectTable::item {
+                padding: 2px 6px;
+                border: none;
+            }
+            QTableWidget#modelSelectTable::item:selected {
+                background: #dbeafe;
+                color: #1e1b4b;
+            }
+            QTableWidget#modelSelectTable QHeaderView::section {
+                background: #eef2ff;
+                color: #312e81;
+                border: none;
+                border-bottom: 1px solid #dbe3ff;
+                padding: 8px 6px;
+                font-weight: 700;
+            }
+            QDialogButtonBox#modelSelectButtonBox QPushButton {
+                min-height: 34px;
+                min-width: 92px;
+            }
+            QPushButton#modelOpActionBtn {
+                min-height: 24px;
+                max-height: 24px;
+                padding: 0px 6px;
+                border-radius: 7px;
+                font-size: 11px;
+                font-weight: 600;
+                text-align: center;
+                background: #ffffff;
+                color: #334155;
+                border: 1px solid #dbe3ff;
+            }
+            QPushButton#modelOpActionBtn:hover {
+                background: #f8fafc;
+                border-color: #c7d2fe;
+                color: #312e81;
+            }
+            QPushButton#modelOpActionBtn:pressed {
+                background: #eef2ff;
+            }
+        """)
 
     def browse_path(self):
         """浏览自定义路径"""
@@ -818,8 +1012,9 @@ class ModelSelectionDialog(QDialog):
                     row, self.SIZE_COL, QTableWidgetItem(model['size']))
                 self.model_table.setItem(
                     row, self.MODIFIED_COL, QTableWidgetItem(model['modified']))
-                self.model_table.setItem(
-                    row, self.PATH_COL, QTableWidgetItem(model['path']))
+                path_item = QTableWidgetItem(model['path'])
+                path_item.setToolTip(model['path'])
+                self.model_table.setItem(row, self.PATH_COL, path_item)
         except Exception as e:
             QMessageBox.critical(self, "错误", f"刷新模型列表失败: {str(e)}")
 
@@ -945,19 +1140,21 @@ class ModelSelectionDialog(QDialog):
     def _create_model_operation_buttons(self, row, model, table, download_path_edit, download_handler, copy_handler):
         widget = QWidget()
         layout = QHBoxLayout(widget)
-        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setContentsMargins(2, 1, 2, 1)
         layout.setSpacing(4)
 
         download_btn = QPushButton("下载")
-        download_btn.setIcon(ThemeIcons.icon("download", 14, "#ffffff"))
-        download_btn.setIconSize(QSize(14, 14))
-        download_btn.setFixedSize(76, 30)
+        download_btn.setObjectName("modelOpActionBtn")
+        download_btn.setIcon(ThemeIcons.icon("download", 14, "#4f46e5"))
+        download_btn.setIconSize(QSize(12, 12))
+        self._fit_model_op_button(download_btn, "下载")
         download_btn.clicked.connect(functools.partial(download_handler, row))
 
         copy_btn = QPushButton("复制")
-        copy_btn.setIcon(ThemeIcons.icon("link", 14, "#ffffff"))
-        copy_btn.setIconSize(QSize(14, 14))
-        copy_btn.setFixedSize(76, 30)
+        copy_btn.setObjectName("modelOpActionBtn")
+        copy_btn.setIcon(ThemeIcons.icon("link", 14, "#4f46e5"))
+        copy_btn.setIconSize(QSize(12, 12))
+        self._fit_model_op_button(copy_btn, "复制")
         copy_btn.clicked.connect(functools.partial(copy_handler, model))
 
         local_path = Path(download_path_edit.text()) / model['文件名']
@@ -968,8 +1165,19 @@ class ModelSelectionDialog(QDialog):
 
         layout.addWidget(download_btn)
         layout.addWidget(copy_btn)
-        layout.addStretch()
+        layout.setAlignment(Qt.AlignCenter)
+        widget.setMinimumHeight(self.OP_ROW_H - 2)
         table.setCellWidget(row, self.ACTION_COL, widget)
+        if table.rowHeight(row) < self.OP_ROW_H:
+            table.setRowHeight(row, self.OP_ROW_H)
+
+    def _fit_model_op_button(self, btn: QPushButton, text: str):
+        """按按钮文本计算紧凑宽度，避免操作列出现过长按钮。"""
+        fm = btn.fontMetrics()
+        text_w = fm.horizontalAdvance(text)
+        # 图标(12) + 间距 + 左右内边距 + 安全余量
+        w = max(48, int(text_w + 30))
+        btn.setFixedSize(w, self.OP_BTN_H)
 
     def _create_operation_buttons(self, row, model):
         """创建操作按钮"""
@@ -2332,10 +2540,12 @@ class DetectionResultWidget(QWidget):
             # 流检测（视频/摄像头）过程中遇到“当前帧无目标”时，也记录空帧，
             # 这样导出可保持逐帧时间轴完整。
             if is_stream_running and is_stream_source:
-                frame_no = int(getattr(win, "_video_export_frame_index", 0) or 0)
+                frame_no = int(
+                    getattr(win, "_video_export_frame_index", 0) or 0)
                 if frame_no <= 0:
                     frame_no = self._video_last_frame_no + 1
-                self._video_last_frame_no = max(self._video_last_frame_no, frame_no)
+                self._video_last_frame_no = max(
+                    self._video_last_frame_no, frame_no)
                 frame_time_str = datetime.now().strftime("%H:%M:%S")
                 self._video_detail_rows.append({
                     "帧序号": frame_no,
@@ -2502,7 +2712,8 @@ class DetectionResultWidget(QWidget):
             frame_no = int(getattr(win, "_video_export_frame_index", 0) or 0)
             if frame_no <= 0:
                 frame_no = self._video_last_frame_no + 1
-            self._video_last_frame_no = max(self._video_last_frame_no, frame_no)
+            self._video_last_frame_no = max(
+                self._video_last_frame_no, frame_no)
             for row in frame_rows:
                 new_row = dict(row)
                 new_row["帧序号"] = frame_no
@@ -4785,6 +4996,11 @@ class EnhancedDetectionUI(QMainWindow):
         title_row.addLayout(title_block, 1)
         header_layout.addLayout(title_row, 0)
         header_layout.addStretch(1)
+        self.header_help_btn = QPushButton("使用帮助")
+        self.header_help_btn.setObjectName("headerToolBtn")
+        self._set_btn_icon(self.header_help_btn, "help", "#e5e7eb", 16)
+        self.header_help_btn.clicked.connect(self.open_usage_help_dialog)
+        header_layout.addWidget(self.header_help_btn, 0, Qt.AlignVCenter)
         wrap_layout.addWidget(app_header)
         self.result_detail_widget = DetectionResultWidget()
         self.result_detail_widget.stats_label.hide()
@@ -4929,6 +5145,115 @@ class EnhancedDetectionUI(QMainWindow):
         lay.addWidget(text_lbl, 0, Qt.AlignVCenter)
         lay.addStretch()
         return row
+
+    def open_usage_help_dialog(self):
+        """主页右上角全局使用帮助。"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("使用帮助")
+        dlg.resize(920, 700)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        # 复用原“高级模型选择”中的帮助内容，保持原封不动。
+        help_widget = QWidget()
+        prev_help_tab = getattr(self, "help_tab", None)
+        self.help_tab = help_widget
+        try:
+            ModelSelectionDialog.setup_help_tab(self)
+        finally:
+            if prev_help_tab is not None:
+                self.help_tab = prev_help_tab
+            else:
+                try:
+                    delattr(self, "help_tab")
+                except Exception:
+                    pass
+        lay.addWidget(help_widget, 1)
+
+        # 热更新：帮助窗口打开期间，保存 docs/help_sections/*.md 会自动回显。
+        help_dir = (base_dir / "docs" / "help_sections").resolve()
+        reload_help = getattr(help_widget, "_reload_help_from_md", None)
+        if callable(reload_help):
+            watcher = QFileSystemWatcher(dlg)
+
+            def _reload_help_md():
+                reload_help()
+
+            if help_dir.exists():
+                watcher.addPath(str(help_dir))
+                for p in help_dir.glob("*.md"):
+                    watcher.addPath(str(p))
+
+            def _on_file_changed(_path: str):
+                # 某些平台会在保存后丢失监听，重载后重新挂载。
+                _reload_help_md()
+                for p in help_dir.glob("*.md"):
+                    sp = str(p)
+                    if sp not in watcher.files():
+                        watcher.addPath(sp)
+
+            def _on_dir_changed(_path: str):
+                if help_dir.exists() and str(help_dir) not in watcher.directories():
+                    watcher.addPath(str(help_dir))
+                for p in help_dir.glob("*.md"):
+                    sp = str(p)
+                    if sp not in watcher.files():
+                        watcher.addPath(sp)
+                _reload_help_md()
+
+            watcher.fileChanged.connect(_on_file_changed)
+            watcher.directoryChanged.connect(_on_dir_changed)
+            dlg._help_md_watcher = watcher
+
+        dlg.setStyleSheet(StyleManager.get_main_stylesheet(1.0) + """
+            QWidget#helpNavStrip {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #f8fafc, stop:1 #f1f5f9);
+                border: none;
+                border-bottom: 1px solid #dbe3ff;
+            }
+            QPlainTextEdit#helpMiniMap {
+                border: 1px solid #dbe3ff;
+                border-radius: 10px;
+                background: #f8fafc;
+                color: #94a3b8;
+                padding: 6px 6px;
+            }
+            QTextEdit#helpMarkdownViewer {
+                border: 1px solid #dbe3ff;
+                border-radius: 10px;
+                background: #ffffff;
+                padding: 12px 14px;
+                selection-background-color: #dbeafe;
+                color: #0f172a;
+                font-size: 13px;
+                line-height: 1.65;
+            }
+            QPushButton#helpNavBtn {
+                min-height: 40px;
+                padding: 0 16px;
+                border-radius: 10px;
+                border: 1px solid transparent;
+                background: transparent;
+                color: #334155;
+                font-weight: 700;
+                font-size: 15px;
+                text-align: left;
+            }
+            QPushButton#helpNavBtn:hover {
+                background: #eef2ff;
+                border-color: #c7d2fe;
+                color: #1e3a8a;
+            }
+            QPushButton#helpNavBtn:checked {
+                background: #e0e7ff;
+                border: 1px solid #93c5fd;
+                color: #1d4ed8;
+                font-weight: 700;
+            }
+        """)
+        dlg.exec()
 
     @staticmethod
     def _set_btn_icon(btn, name: str, color: str = "#ffffff", size: int = 18):
