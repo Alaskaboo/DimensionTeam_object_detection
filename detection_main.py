@@ -598,8 +598,9 @@ class ModelSelectionDialog(QDialog):
     def setup_help_tab(self):
         """设置帮助标签页"""
         help_host = self.help_tab
+        help_host.setObjectName("helpRoot")
         layout = QVBoxLayout(help_host)
-        layout.setSpacing(6)
+        layout.setSpacing(0)
         layout.setContentsMargins(0, 0, 0, 0)
 
         section_wrap = QWidget()
@@ -613,126 +614,470 @@ class ModelSelectionDialog(QDialog):
         section_row.setSpacing(10)
         layout.addWidget(section_wrap)
 
+        help_shell = QWidget()
+        help_shell.setObjectName("helpShell")
+        shell_lay = QHBoxLayout(help_shell)
+        shell_lay.setContentsMargins(10, 8, 10, 10)
+        shell_lay.setSpacing(10)
+
+        article_wrap = QWidget()
+        article_wrap.setObjectName("helpArticleWrap")
+        article_wrap.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        article_lay = QHBoxLayout(article_wrap)
+        article_lay.setContentsMargins(0, 0, 0, 0)
+        article_lay.setSpacing(0)
+
+        _help_ff = StyleManager.help_document_font_family_css()
+        _help_mono = StyleManager.MONO_FONT_FAMILY
+
         viewer = QTextEdit()
         viewer.setReadOnly(True)
         viewer.setLineWrapMode(QTextEdit.WidgetWidth)
         viewer.setMinimumHeight(520)
         viewer.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        viewer.setFont(StyleManager.application_ui_font())
+        viewer.setFont(StyleManager.help_document_qfont())
         viewer.setObjectName("helpMarkdownViewer")
-        viewer.document().setDefaultStyleSheet("""
-            body {
-                font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
-                font-size: 14px;
-                line-height: 1.78;
-                color: #0f172a;
+        viewer.document().setDocumentMargin(6)
+        _help_md_css = """
+            html, body {
+                font-family: __HELP_FF__;
+                font-size: 16px;
+                line-height: 2.0;
+                color: #1e293b;
+                text-align: left;
+                margin: 0;
+                padding: 0;
+            }
+            h1, h2, h3, h4 {
+                font-family: __HELP_FF__;
+                text-align: left;
             }
             h1 {
-                font-size: 34px;
+                font-size: 30px;
                 font-weight: 700;
+                letter-spacing: -0.02em;
                 color: #0f172a;
-                margin: 0 0 10px 0;
+                margin: 0 0 22px 0;
+                padding-bottom: 14px;
+                border-bottom: 1px solid #e8eef5;
             }
             h2 {
-                font-size: 27px;
-                font-weight: 700;
+                font-size: 24px;
+                font-weight: 600;
                 color: #1e293b;
-                margin: 14px 0 8px 0;
+                margin: 30px 0 12px 0;
+                line-height: 1.45;
             }
             h3 {
                 font-size: 19px;
-                font-weight: 700;
+                font-weight: 600;
                 color: #334155;
-                margin: 10px 0 6px 0;
+                margin: 22px 0 10px 0;
+                line-height: 1.5;
             }
-            p, li {
-                font-size: 14px;
-                color: #0f172a;
+            p {
+                font-size: 16px;
+                color: #334155;
+                text-align: left;
+                margin: 0 0 18px 0;
+                line-height: 2.0;
+            }
+            li {
+                font-size: 16px;
+                color: #334155;
+                text-align: left;
+                margin: 10px 0;
+                line-height: 2.0;
             }
             ul, ol {
-                margin: 4px 0 8px 18px;
+                margin: 12px 0 22px 24px;
+                padding-left: 8px;
+                text-align: left;
             }
             hr {
                 border: none;
-                border-top: 1px solid #dbe3ff;
-                margin: 12px 0;
+                border-top: 1px solid #e8eef5;
+                margin: 26px 0;
             }
             code {
-                font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
-                background: #eef2ff;
-                color: #334155;
-                padding: 1px 4px;
-                border-radius: 5px;
+                font-family: __HELP_MONO__;
+                font-size: 14px;
+                background: #f1f5f9;
+                color: #475569;
+                padding: 2px 6px;
+                border-radius: 4px;
+            }
+            pre, pre code {
+                font-family: __HELP_MONO__;
+                font-size: 13px;
+                line-height: 1.7;
             }
             table {
                 border-collapse: collapse;
-                margin: 6px 0 10px 0;
+                margin: 18px 0 24px 0;
+                text-align: left;
+                font-family: __HELP_FF__;
             }
             th, td {
-                border: 1px solid #dbe3ff;
-                padding: 5px 8px;
+                border: 1px solid #e8eef5;
+                padding: 10px 14px;
+                line-height: 1.8;
+                font-family: __HELP_FF__;
             }
             th {
-                background: #eef2ff;
+                background: #f8fafc;
+                font-weight: 600;
+                color: #334155;
             }
             blockquote {
-                border-left: 3px solid #a5b4fc;
-                margin: 8px 0;
-                padding: 4px 10px;
-                color: #334155;
-                background: #f8faff;
+                border-left: 3px solid #c7d2fe;
+                margin: 18px 0;
+                padding: 14px 18px;
+                color: #475569;
+                background: #f8fafc;
+                border-radius: 0 8px 8px 0;
+                text-align: left;
+                line-height: 1.95;
+                font-family: __HELP_FF__;
             }
-        """)
-        layout.addWidget(viewer, 1)
+        """
+        viewer.document().setDefaultStyleSheet(
+            _help_md_css.replace("__HELP_FF__", _help_ff).replace(
+                "__HELP_MONO__", _help_mono))
+        # 占满 article 区域宽度，不再两侧留空、也不再限制 maxWidth。
+        viewer.setMinimumWidth(200)
+        viewer.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        article_lay.addWidget(viewer, 1)
+        shell_lay.addWidget(article_wrap, 1)
 
-        def _jump_to_ratio(ratio: float):
-            sb = viewer.verticalScrollBar()
-            ratio = max(0.0, min(1.0, float(ratio)))
-            sb.setValue(int(round(ratio * sb.maximum())))
+        toc_panel = QFrame()
+        toc_panel.setObjectName("helpTocPanel")
+        toc_panel.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        toc_panel.setFixedWidth(214)
+        toc_v = QVBoxLayout(toc_panel)
+        toc_v.setContentsMargins(8, 8, 8, 8)
+        toc_v.setSpacing(6)
+        toc_header = QWidget()
+        toc_header_lay = QHBoxLayout(toc_header)
+        toc_header_lay.setContentsMargins(0, 0, 0, 0)
+        toc_header_lay.setSpacing(8)
+        toc_icon = QLabel()
+        toc_icon.setPixmap(ThemeIcons.pixmap("list", 16, "#64748b"))
+        toc_title = QLabel("目录")
+        toc_title.setObjectName("helpTocTitle")
+        toc_header_lay.addWidget(toc_icon, 0, Qt.AlignVCenter)
+        toc_header_lay.addWidget(toc_title, 0, Qt.AlignVCenter)
+        toc_header_lay.addStretch(1)
+        toc_tree = QTreeWidget()
+        toc_tree.setObjectName("helpTocTree")
+        toc_tree.setHeaderHidden(True)
+        toc_tree.setRootIsDecorated(True)
+        toc_tree.setAnimated(True)
+        toc_tree.setIndentation(12)
+        toc_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        toc_tree.setSelectionMode(QAbstractItemView.SingleSelection)
+        toc_tree.setUniformRowHeights(False)
+        toc_v.addWidget(toc_header)
+        toc_v.addWidget(toc_tree, 1)
+        shell_lay.addWidget(toc_panel, 0)
 
-        class _HelpMiniMap(QPlainTextEdit):
-            def __init__(self, jump_cb, parent=None):
-                super().__init__(parent)
-                self._jump_cb = jump_cb
-                self.setCursor(Qt.PointingHandCursor)
+        layout.addWidget(help_shell, 1)
 
-            def _handle_jump(self, event):
-                h = max(1, self.viewport().height())
-                y = max(0, min(h, int(event.position().y())))
-                self._jump_cb(y / h)
-
-            def mousePressEvent(self, event):
-                if event.button() == Qt.LeftButton:
-                    self._handle_jump(event)
-                super().mousePressEvent(event)
-
-            def mouseMoveEvent(self, event):
-                if event.buttons() & Qt.LeftButton:
-                    self._handle_jump(event)
-                super().mouseMoveEvent(event)
-
-            def wheelEvent(self, event):
-                event.ignore()
-
-        mini_map = _HelpMiniMap(_jump_to_ratio, viewer)
-        mini_map.setObjectName("helpMiniMap")
-        mini_map.setReadOnly(True)
-        mini_map.setWordWrapMode(QTextOption.NoWrap)
-        mini_map.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        mini_map.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        mini_map.setFixedSize(132, 168)
-        fmini = QFont("Cascadia Mono", 6)
-        fmini.setStyleHint(QFont.Monospace)
-        mini_map.setFont(fmini)
-        mini_map.raise_()
         help_host._help_md_viewer = viewer
+        help_host._help_toc_tree = toc_tree
         help_host._help_section_row = section_row
-        help_host._help_mini_map = mini_map
+        help_host._help_last_md = ""
+        _HEADING_IDX_ROLE = Qt.ItemDataRole.UserRole + 32
+
+        _help_heading_re = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+
+        def _parse_md_headings(md_text: str) -> list[tuple[int, str]]:
+            out: list[tuple[int, str]] = []
+            for line in (md_text or "").splitlines():
+                m = _help_heading_re.match(line.strip())
+                if m:
+                    out.append((len(m.group(1)), m.group(2).strip()))
+            return out
+
+        def _jump_help_to_heading(title: str) -> None:
+            t = (title or "").strip()
+            if not t:
+                return
+            help_host._help_spy_suppress = True
+            doc = viewer.document()
+            for i in range(doc.blockCount()):
+                block = doc.findBlockByNumber(i)
+                line = block.text().strip()
+                if line == t:
+                    cur = QTextCursor(block)
+                    viewer.setTextCursor(cur)
+                    viewer.ensureCursorVisible()
+                    QTimer.singleShot(
+                        120, lambda: setattr(help_host, "_help_spy_suppress", False))
+                    return
+            for i in range(doc.blockCount()):
+                block = doc.findBlockByNumber(i)
+                line = block.text().strip()
+                if line.startswith(t):
+                    cur = QTextCursor(block)
+                    viewer.setTextCursor(cur)
+                    viewer.ensureCursorVisible()
+                    QTimer.singleShot(
+                        120, lambda: setattr(help_host, "_help_spy_suppress", False))
+                    return
+            QTimer.singleShot(
+                0, lambda: setattr(help_host, "_help_spy_suppress", False))
+
+        def _normalize_md_to_text(md_text: str) -> tuple[str, dict[int, int]]:
+            """将 Markdown 规范化为易读纯文本，并返回标题行级别映射。"""
+            if not md_text:
+                return "", {}
+
+            def _clean_inline(s: str) -> str:
+                s = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", s)  # link
+                s = re.sub(r"`([^`]+)`", r"\1", s)  # inline code
+                s = re.sub(r"\*\*([^*]+)\*\*", r"\1", s)  # bold **
+                s = re.sub(r"__([^_]+)__", r"\1", s)  # bold __
+                s = re.sub(r"\*([^*]+)\*", r"\1", s)  # italic *
+                s = re.sub(r"_([^_]+)_", r"\1", s)  # italic _
+                s = re.sub(r"~~([^~]+)~~", r"\1", s)  # strikethrough
+                return s.strip()
+
+            out: list[str] = []
+            heading_levels_raw: dict[int, int] = {}
+            in_code = False
+            for raw in md_text.splitlines():
+                line = raw.rstrip()
+                stripped = line.strip()
+
+                if stripped.startswith("```"):
+                    in_code = not in_code
+                    if out and out[-1] != "":
+                        out.append("")
+                    continue
+
+                if in_code:
+                    out.append(line)
+                    continue
+
+                hm = _help_heading_re.match(stripped)
+                if hm:
+                    level = len(hm.group(1))
+                    title = _clean_inline(hm.group(2))
+                    if out and out[-1] != "":
+                        out.append("")
+                    heading_line = len(out)
+                    out.append(title)
+                    heading_levels_raw[heading_line] = level
+                    out.append("")
+                    continue
+
+                if re.match(r"^\s*[-*+]\s+", line):
+                    txt = _clean_inline(re.sub(r"^\s*[-*+]\s+", "", line))
+                    out.append(f"• {txt}" if txt else "")
+                    continue
+
+                om = re.match(r"^\s*(\d+)\.\s+(.*)$", line)
+                if om:
+                    num = om.group(1)
+                    txt = _clean_inline(om.group(2))
+                    out.append(f"{num}. {txt}" if txt else f"{num}.")
+                    continue
+
+                if stripped.startswith(">"):
+                    out.append(_clean_inline(stripped.lstrip("> ").strip()))
+                    continue
+
+                if stripped.startswith("|") and stripped.endswith("|"):
+                    # 跳过 markdown 表头分隔行
+                    if re.match(r"^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?$", stripped):
+                        continue
+                    cols = [c.strip() for c in stripped.strip("|").split("|")]
+                    cols = [_clean_inline(c) for c in cols if c.strip()]
+                    out.append("  |  ".join(cols))
+                    continue
+
+                if stripped == "":
+                    if out and out[-1] != "":
+                        out.append("")
+                else:
+                    out.append(_clean_inline(stripped))
+
+            # 去掉首尾空行和重复空行
+            cleaned: list[str] = []
+            old_to_new: dict[int, int] = {}
+            for i, s in enumerate(out):
+                if s == "" and cleaned and cleaned[-1] == "":
+                    continue
+                old_to_new[i] = len(cleaned)
+                cleaned.append(s)
+            lead_blanks = 0
+            while lead_blanks < len(cleaned) and cleaned[lead_blanks] == "":
+                lead_blanks += 1
+            tail = len(cleaned)
+            while tail > lead_blanks and cleaned[tail - 1] == "":
+                tail -= 1
+            final_lines = cleaned[lead_blanks:tail]
+            heading_levels: dict[int, int] = {}
+            for old_idx, level in heading_levels_raw.items():
+                if old_idx not in old_to_new:
+                    continue
+                new_idx = old_to_new[old_idx] - lead_blanks
+                if 0 <= new_idx < len(final_lines):
+                    heading_levels[new_idx] = level
+            return "\n".join(final_lines), heading_levels
+
+        def _apply_help_plain_text_styles(heading_levels: dict[int, int]) -> None:
+            """根据标题级别给纯文本应用层级样式（字号/字重/段距）。"""
+            doc = viewer.document()
+            default_bf = QTextBlockFormat()
+            default_bf.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            default_bf.setTopMargin(0)
+            default_bf.setBottomMargin(8)
+
+            default_cf = QTextCharFormat()
+            default_cf.setFontFamilies([
+                "Times New Roman",
+                "Microsoft YaHei UI",
+                "PingFang SC",
+            ])
+            default_cf.setFontPointSize(16.0)
+            default_cf.setForeground(QColor("#1e293b"))
+            default_cf.setFontWeight(QFont.Weight.Normal)
+
+            heading_sizes = {1: 30.0, 2: 24.0, 3: 20.0, 4: 18.0, 5: 17.0, 6: 16.0}
+            heading_weights = {
+                1: QFont.Weight.Bold,
+                2: QFont.Weight.DemiBold,
+                3: QFont.Weight.DemiBold,
+                4: QFont.Weight.Medium,
+                5: QFont.Weight.Medium,
+                6: QFont.Weight.Medium,
+            }
+
+            cur = QTextCursor(doc)
+            cur.beginEditBlock()
+            blk = doc.begin()
+            while blk.isValid():
+                line_no = blk.blockNumber()
+                level = int(heading_levels.get(line_no, 0))
+
+                bf = QTextBlockFormat(default_bf)
+                cf = QTextCharFormat(default_cf)
+                if level > 0:
+                    lv = max(1, min(6, level))
+                    cf.setFontPointSize(heading_sizes.get(lv, 18.0))
+                    cf.setFontWeight(heading_weights.get(lv, QFont.Weight.Medium))
+                    cf.setForeground(QColor("#0f172a"))
+                    if lv == 1:
+                        bf.setTopMargin(10)
+                        bf.setBottomMargin(12)
+                    elif lv == 2:
+                        bf.setTopMargin(8)
+                        bf.setBottomMargin(9)
+                    else:
+                        bf.setTopMargin(6)
+                        bf.setBottomMargin(8)
+
+                cur.setPosition(blk.position())
+                cur.setBlockFormat(bf)
+                cur.select(QTextCursor.SelectionType.BlockUnderCursor)
+                cur.mergeCharFormat(cf)
+                blk = blk.next()
+            cur.endEditBlock()
+
+        def _rebuild_help_toc(md_text: str) -> None:
+            toc_tree.clear()
+            headings = _parse_md_headings(md_text)
+            if not headings:
+                empty = QTreeWidgetItem(["（本节无标题）"])
+                empty.setFlags(Qt.NoItemFlags)
+                toc_tree.addTopLevelItem(empty)
+                help_host._help_heading_blocks = []
+                return
+            stack: list[tuple[int, QTreeWidgetItem]] = []
+            h_idx = 0
+            for level, title in headings:
+                node = QTreeWidgetItem([title])
+                node.setData(0, Qt.UserRole, title)
+                node.setData(0, _HEADING_IDX_ROLE, h_idx)
+                node.setToolTip(0, title)
+                h_idx += 1
+                while stack and stack[-1][0] >= level:
+                    stack.pop()
+                if not stack:
+                    toc_tree.addTopLevelItem(node)
+                else:
+                    stack[-1][1].addChild(node)
+                stack.append((level, node))
+            toc_tree.collapseAll()
+
+        def _index_help_heading_blocks() -> None:
+            md_text = getattr(help_host, "_help_last_md", "") or ""
+            headings = _parse_md_headings(md_text)
+            doc = viewer.document()
+            blocks: list = []
+            for _level, title in headings:
+                blk = None
+                for i in range(doc.blockCount()):
+                    b = doc.findBlockByNumber(i)
+                    if b.text().strip() == title:
+                        blk = b
+                        break
+                blocks.append(blk)
+            help_host._help_heading_blocks = blocks
+
+        def _sync_toc_from_scroll(_value=None) -> None:
+            if getattr(help_host, "_help_spy_suppress", False):
+                return
+            blocks = getattr(help_host, "_help_heading_blocks", None)
+            if not blocks:
+                return
+            lay = viewer.document().documentLayout()
+            if lay is None:
+                return
+            scroll_y = float(viewer.verticalScrollBar().value())
+            active_idx = -1
+            for i, block in enumerate(blocks):
+                if block is None:
+                    continue
+                try:
+                    top = lay.blockBoundingRect(block).top()
+                except Exception:
+                    continue
+                if top <= scroll_y + 12.0:
+                    active_idx = i
+            if active_idx < 0:
+                return
+
+            it = QTreeWidgetItemIterator(toc_tree)
+            while it.value():
+                cur = it.value()
+                idx = cur.data(0, _HEADING_IDX_ROLE)
+                if idx is not None and int(idx) == active_idx:
+                    toc_tree.blockSignals(True)
+                    toc_tree.setCurrentItem(cur)
+                    toc_tree.scrollToItem(cur, QAbstractItemView.ScrollHint.EnsureVisible)
+                    toc_tree.blockSignals(False)
+                    return
+                it += 1
+
+        def _on_toc_tree_clicked(item: QTreeWidgetItem, _column: int) -> None:
+            if item is None:
+                return
+            title = item.data(0, Qt.UserRole)
+            if title:
+                _jump_help_to_heading(str(title))
+
+        toc_tree.itemClicked.connect(_on_toc_tree_clicked)
+        viewer.verticalScrollBar().valueChanged.connect(_sync_toc_from_scroll)
 
         fixed_nav = ["使用说明", "模型说明", "常见问题", "软件介绍"]
         nav_icon_map = {
-            "使用说明": "settings",
+            "使用说明": "book",
             "模型说明": "cpu",
             "常见问题": "help",
             "软件介绍": "sparkles",
@@ -751,37 +1096,21 @@ class ModelSelectionDialog(QDialog):
                 if w is not None:
                     w.deleteLater()
 
-        def _sync_mini_scroll():
-            mini = getattr(help_host, "_help_mini_map", None)
-            if mini is None:
-                return
-            sb_src = viewer.verticalScrollBar()
-            sb_dst = mini.verticalScrollBar()
-            max_src = max(1, sb_src.maximum())
-            max_dst = max(0, sb_dst.maximum())
-            ratio = sb_src.value() / max_src
-            sb_dst.setValue(int(ratio * max_dst))
-
-        def _position_mini_map():
-            mini = getattr(help_host, "_help_mini_map", None)
-            if mini is None:
-                return
-            margin = 10
-            x = max(margin, viewer.width() - mini.width() - margin)
-            y = margin
-            mini.move(x, y)
-            mini.raise_()
-
         def _set_view_content(sec: str):
             md_text = help_host._help_section_map.get(sec, "")
-            viewer.setMarkdown(md_text)
-            mini = getattr(help_host, "_help_mini_map", None)
-            if mini is not None:
-                doc = QTextDocument()
-                doc.setMarkdown(md_text)
-                mini.setPlainText(doc.toPlainText())
-                _sync_mini_scroll()
-                _position_mini_map()
+            help_host._help_last_md = md_text
+            plain_text, heading_levels = _normalize_md_to_text(md_text)
+            viewer.setPlainText(plain_text)
+            _rebuild_help_toc(md_text)
+            sb = viewer.verticalScrollBar()
+
+            def _after_layout():
+                _apply_help_plain_text_styles(heading_levels)
+                sb.setValue(0)
+                _index_help_heading_blocks()
+                _sync_toc_from_scroll()
+
+            QTimer.singleShot(0, _after_layout)
 
         def _render_help(section_map: dict):
             _clear_section_row()
@@ -819,22 +1148,6 @@ class ModelSelectionDialog(QDialog):
             _set_view_content(current)
             help_host._help_current_section = current
 
-        class _ViewerResizeFilter(QObject):
-            def __init__(self, on_resize, parent=None):
-                super().__init__(parent)
-                self._on_resize = on_resize
-
-            def eventFilter(self, watched, event):
-                if event.type() in (QEvent.Resize, QEvent.Show):
-                    self._on_resize()
-                return False
-
-        viewer.verticalScrollBar().valueChanged.connect(lambda _v: _sync_mini_scroll())
-        viewer.verticalScrollBar().rangeChanged.connect(lambda _a, _b: _sync_mini_scroll())
-        resize_filter = _ViewerResizeFilter(_position_mini_map, help_host)
-        viewer.installEventFilter(resize_filter)
-        help_host._help_mini_resize_filter = resize_filter
-
         def _reload_help_from_md():
             section_map = {}
             for title in fixed_nav:
@@ -850,7 +1163,6 @@ class ModelSelectionDialog(QDialog):
 
         help_host._reload_help_from_md = _reload_help_from_md
         _reload_help_from_md()
-        QTimer.singleShot(0, _position_mini_map)
 
     def _create_table(self, headers, column_count, object_name="modelSelectTable"):
         """创建标准表格控件"""
@@ -1018,41 +1330,48 @@ class ModelSelectionDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"刷新模型列表失败: {str(e)}")
 
-    def load_network_models(self):
-        """加载网络模型数据"""
+    def _load_models_csv(
+        self,
+        csv_name: str,
+        attr_name: str,
+        refresh_fn,
+        label: str,
+    ) -> None:
+        """从 csv_reports 读取模型列表并刷新对应表格。"""
         try:
-            csv_path = base_dir / "csv_reports" / "pt_files_report.csv"
+            csv_path = base_dir / "csv_reports" / csv_name
             if not csv_path.exists():
-                QMessageBox.warning(self, "警告", f"未找到网络模型数据文件 {csv_path}")
+                QMessageBox.warning(
+                    self, "警告", f"未找到{label}模型数据文件 {csv_path}")
                 return
-
             models_data = self._read_csv_with_encodings(csv_path)
             if not models_data:
-                QMessageBox.warning(self, "警告", "无法正确读取网络模型数据文件")
+                QMessageBox.warning(
+                    self, "警告", f"无法正确读取{label}模型数据文件")
                 return
-
-            self.network_models = models_data
-            self.refresh_network_models()
+            setattr(self, attr_name, models_data)
+            refresh_fn()
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"加载网络模型数据失败: {str(e)}")
+            QMessageBox.critical(
+                self, "错误", f"加载{label}模型数据失败: {str(e)}")
+
+    def load_network_models(self):
+        """加载网络模型数据"""
+        self._load_models_csv(
+            "pt_files_report.csv",
+            "network_models",
+            self.refresh_network_models,
+            "网络",
+        )
 
     def load_official_network_models(self):
         """加载官方网络模型数据"""
-        try:
-            csv_path = base_dir / "csv_reports" / "YOLO_pt_files_report.csv"
-            if not csv_path.exists():
-                QMessageBox.warning(self, "警告", f"未找到官方网络模型数据文件 {csv_path}")
-                return
-
-            models_data = self._read_csv_with_encodings(csv_path)
-            if not models_data:
-                QMessageBox.warning(self, "警告", "无法正确读取官方网络模型数据文件")
-                return
-
-            self.official_network_models = models_data
-            self.refresh_official_network_models()
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"加载官方网络模型数据失败: {str(e)}")
+        self._load_models_csv(
+            "YOLO_pt_files_report.csv",
+            "official_network_models",
+            self.refresh_official_network_models,
+            "官方网络",
+        )
 
     def _read_csv_with_encodings(self, file_path):
         """尝试多种编码读取CSV文件"""
@@ -1068,69 +1387,53 @@ class ModelSelectionDialog(QDialog):
                 continue
         return []
 
-    def refresh_network_models(self):
-        """刷新网络模型列表"""
-        self.network_table.setRowCount(len(self.network_models))
-
-        for row, model in enumerate(self.network_models):
-            # 基本信息列
-            self.network_table.setItem(
+    def _populate_network_model_rows(
+        self,
+        models: list,
+        table: QTableWidget,
+        path_edit: QLineEdit,
+        add_row_buttons,
+    ) -> None:
+        """填充网络 / 官方网络模型表的共用逻辑。"""
+        table.setRowCount(len(models))
+        for row, model in enumerate(models):
+            table.setItem(
                 row, self.MODEL_NAME_COL, QTableWidgetItem(model['文件名']))
-            self.network_table.setItem(
+            table.setItem(
                 row, self.SIZE_COL, QTableWidgetItem(f"{model['大小(MB)']} MB"))
-            self.network_table.setItem(
+            table.setItem(
                 row, self.MODIFIED_COL, QTableWidgetItem(model['修改日期']))
-            self.network_table.setItem(
-                row, self.STATUS_COL - 1, QTableWidgetItem(model['类别数量']))  # 类别数量列
+            table.setItem(
+                row, self.STATUS_COL - 1, QTableWidgetItem(model['类别数量']))
 
-            # 状态列 - 根据本地文件存在情况判断
-            download_path = Path(self.download_path_edit.text())
+            download_path = Path(path_edit.text())
             local_path = download_path / model['文件名']
             is_downloaded = local_path.exists()
-
             status_text = "已下载" if is_downloaded else "未下载"
-            status_color = QColor(
-                "#27ae60") if is_downloaded else QColor("#e74c3c")
-
+            status_color = (
+                QColor("#27ae60") if is_downloaded else QColor("#e74c3c"))
             status_item = QTableWidgetItem(status_text)
             status_item.setForeground(status_color)
-            self.network_table.setItem(row, self.STATUS_COL, status_item)
+            table.setItem(row, self.STATUS_COL, status_item)
+            add_row_buttons(row, model)
 
-            # 操作列
-            self._create_operation_buttons(row, model)
+    def refresh_network_models(self):
+        """刷新网络模型列表"""
+        self._populate_network_model_rows(
+            self.network_models,
+            self.network_table,
+            self.download_path_edit,
+            self._create_operation_buttons,
+        )
 
     def refresh_official_network_models(self):
         """刷新官方网络模型列表"""
-        self.official_network_table.setRowCount(
-            len(self.official_network_models))
-
-        for row, model in enumerate(self.official_network_models):
-            # 基本信息列
-            self.official_network_table.setItem(
-                row, self.MODEL_NAME_COL, QTableWidgetItem(model['文件名']))
-            self.official_network_table.setItem(
-                row, self.SIZE_COL, QTableWidgetItem(f"{model['大小(MB)']} MB"))
-            self.official_network_table.setItem(
-                row, self.MODIFIED_COL, QTableWidgetItem(model['修改日期']))
-            self.official_network_table.setItem(
-                row, self.STATUS_COL - 1, QTableWidgetItem(model['类别数量']))  # 类别数量列
-
-            # 状态列 - 根据本地文件存在情况判断
-            download_path = Path(self.official_download_path_edit.text())
-            local_path = download_path / model['文件名']
-            is_downloaded = local_path.exists()
-
-            status_text = "已下载" if is_downloaded else "未下载"
-            status_color = QColor(
-                "#27ae60") if is_downloaded else QColor("#e74c3c")
-
-            status_item = QTableWidgetItem(status_text)
-            status_item.setForeground(status_color)
-            self.official_network_table.setItem(
-                row, self.STATUS_COL, status_item)
-
-            # 操作列
-            self._create_official_operation_buttons(row, model)
+        self._populate_network_model_rows(
+            self.official_network_models,
+            self.official_network_table,
+            self.official_download_path_edit,
+            self._create_official_operation_buttons,
+        )
 
     def _build_model_download_url(self, model_name, official=False):
         if official:
@@ -1226,44 +1529,45 @@ class ModelSelectionDialog(QDialog):
 
         dlg.exec()
 
+    def _show_table_model_info(
+        self, table: QTableWidget, models: list, title: str
+    ) -> None:
+        row = table.currentRow()
+        if row < 0 or row >= len(models):
+            return
+        self._show_model_info_dialog(models[row], title)
+
     def show_network_model_info(self):
         """显示网络模型详细信息"""
-        row = self.network_table.currentRow()
-        if row < 0 or row >= len(self.network_models):
-            return
-        self._show_model_info_dialog(self.network_models[row], "模型详细信息")
+        self._show_table_model_info(
+            self.network_table, self.network_models, "模型详细信息")
 
     def show_official_network_model_info(self):
         """显示官方网络模型详细信息"""
-        row = self.official_network_table.currentRow()
-        if row < 0 or row >= len(self.official_network_models):
+        self._show_table_model_info(
+            self.official_network_table,
+            self.official_network_models,
+            "官方模型详细信息",
+        )
+
+    def _exec_network_download_menu(self, table: QTableWidget, download_fn, pos):
+        row = table.currentRow()
+        if row < 0:
             return
-        self._show_model_info_dialog(
-            self.official_network_models[row], "官方模型详细信息")
+        menu = QMenu(self)
+        download_action = menu.addAction("📥 下载模型")
+        download_action.triggered.connect(lambda: download_fn(row))
+        menu.exec(table.viewport().mapToGlobal(pos))
 
     def show_network_context_menu(self, pos):
         """显示网络模型右键菜单"""
-        row = self.network_table.currentRow()
-        if row < 0:
-            return
-
-        menu = QMenu(self)
-        download_action = menu.addAction("📥 下载模型")
-        download_action.triggered.connect(
-            lambda: self.download_network_model(row))
-        menu.exec(self.network_table.viewport().mapToGlobal(pos))
+        self._exec_network_download_menu(
+            self.network_table, self.download_network_model, pos)
 
     def show_official_network_context_menu(self, pos):
         """显示官方网络模型右键菜单"""
-        row = self.official_network_table.currentRow()
-        if row < 0:
-            return
-
-        menu = QMenu(self)
-        download_action = menu.addAction("📥 下载模型")
-        download_action.triggered.connect(
-            lambda: self.download_official_network_model(row))
-        menu.exec(self.official_network_table.viewport().mapToGlobal(pos))
+        self._exec_network_download_menu(
+            self.official_network_table, self.download_official_network_model, pos)
 
     def _download_model_by_row(self, row, models, table, download_path_edit, download_done_text, official=False):
         if row >= len(models):
@@ -1380,39 +1684,46 @@ class ModelSelectionDialog(QDialog):
                 row, self.PATH_COL).text()
             super().accept()
 
-    def _handle_network_selection(self):
-        """处理网络模型选择"""
-        row = self.network_table.currentRow()
+    def _accept_if_local_model_ready(
+        self,
+        table: QTableWidget,
+        models: list,
+        path_edit: QLineEdit,
+        not_downloaded_msg: str,
+    ) -> None:
+        row = table.currentRow()
         if row < 0:
             return
-
-        model = self.network_models[row]
-        model_name = model['文件名']
-        local_path = Path(self.download_path_edit.text()) / model_name
-
+        model = models[row]
+        local_path = Path(path_edit.text()) / model['文件名']
         if not local_path.exists():
-            QMessageBox.warning(self, "警告", "请先下载选中的网络模型！")
+            QMessageBox.warning(self, "警告", not_downloaded_msg)
             return
-
         self.selected_model = str(local_path)
         super().accept()
+
+    def _handle_network_selection(self):
+        """处理网络模型选择"""
+        self._accept_if_local_model_ready(
+            self.network_table,
+            self.network_models,
+            self.download_path_edit,
+            "请先下载选中的网络模型！",
+        )
 
     def _handle_official_network_selection(self):
         """处理官方网络模型选择"""
-        row = self.official_network_table.currentRow()
-        if row < 0:
-            return
+        self._accept_if_local_model_ready(
+            self.official_network_table,
+            self.official_network_models,
+            self.official_download_path_edit,
+            "请先下载选中的官方网络模型！",
+        )
 
-        model = self.official_network_models[row]
-        model_name = model['文件名']
-        local_path = Path(self.official_download_path_edit.text()) / model_name
 
-        if not local_path.exists():
-            QMessageBox.warning(self, "警告", "请先下载选中的官方网络模型！")
-            return
-
-        self.selected_model = str(local_path)
-        super().accept()
+def _format_export_local_time() -> str:
+    """本地时间字符串：导出、历史快照与报告共用格式。"""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 _DETECTION_EXPORT_META_ORDER = (
@@ -2424,7 +2735,7 @@ class DetectionResultWidget(QWidget):
             QMessageBox.warning(self.window(), "导出失败", str(e))
 
     def _write_export_csv(self, save_path: str):
-        export_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        export_time = _format_export_local_time()
         with open(save_path, "w", encoding="utf-8-sig", newline="") as f:
             w = csv.writer(f)
             w.writerow(["【指标项】", "【值】"])
@@ -2442,7 +2753,7 @@ class DetectionResultWidget(QWidget):
             dw.writerows(self._detail_csv_rows)
 
     def _write_export_json(self, save_path: str):
-        export_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        export_time = _format_export_local_time()
         metrics = {
             k: self._export_meta[k]
             for k in _DETECTION_EXPORT_META_ORDER
@@ -2459,7 +2770,7 @@ class DetectionResultWidget(QWidget):
             json.dump(payload, f, ensure_ascii=False, indent=2)
 
     def _write_export_txt(self, save_path: str):
-        export_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        export_time = _format_export_local_time()
         lines = [
             "Dimension 目标检测 — 检测明细导出",
             "=" * 48,
@@ -2494,7 +2805,7 @@ class DetectionResultWidget(QWidget):
                 "导出 Excel 需要安装 openpyxl：\npip install openpyxl",
             )
             return False
-        export_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        export_time = _format_export_local_time()
         wb = Workbook()
         ws1 = wb.active
         ws1.title = "汇总指标"
@@ -3018,6 +3329,27 @@ class StyleManager:
         ])
         f.setPointSizeF(10.0)
         f.setStyleHint(QFont.StyleHint.SansSerif)
+        return f
+
+    @staticmethod
+    def help_document_font_family_css() -> str:
+        """帮助 Markdown正文：西文/数字 Times New Roman，中文回退雅黑等（与 QFont 顺序一致）。"""
+        return (
+            '"Times New Roman", "Microsoft YaHei UI", "PingFang SC", '
+            '"Hiragino Sans GB", "Segoe UI", serif'
+        )
+
+    @staticmethod
+    def help_document_qfont() -> QFont:
+        """与 help_document_font_family_css 一致的 QTextDocument 默认字体（避免与样式表冲突）。"""
+        f = QFont()
+        f.setFamilies([
+            "Times New Roman",
+            "Microsoft YaHei UI",
+            "PingFang SC",
+        ])
+        f.setPointSizeF(12.0)
+        f.setStyleHint(QFont.StyleHint.Serif)
         return f
 
     @staticmethod
@@ -5150,7 +5482,7 @@ class EnhancedDetectionUI(QMainWindow):
         """主页右上角全局使用帮助。"""
         dlg = QDialog(self)
         dlg.setWindowTitle("使用帮助")
-        dlg.resize(920, 700)
+        dlg.resize(1020, 740)
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
@@ -5206,53 +5538,130 @@ class EnhancedDetectionUI(QMainWindow):
             watcher.directoryChanged.connect(_on_dir_changed)
             dlg._help_md_watcher = watcher
 
+        _dlg_help_ff = StyleManager.help_document_font_family_css()
         dlg.setStyleSheet(StyleManager.get_main_stylesheet(1.0) + """
-            QWidget#helpNavStrip {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #f8fafc, stop:1 #f1f5f9);
-                border: none;
-                border-bottom: 1px solid #dbe3ff;
+            QWidget#helpRoot {
+                background: #eef2f6;
             }
-            QPlainTextEdit#helpMiniMap {
-                border: 1px solid #dbe3ff;
-                border-radius: 10px;
-                background: #f8fafc;
-                color: #94a3b8;
-                padding: 6px 6px;
+            QWidget#helpShell {
+                background: #eef2f6;
+            }
+            QWidget#helpArticleWrap {
+                background: transparent;
+            }
+            QWidget#helpNavStrip {
+                background: #ffffff;
+                border: none;
+                border-bottom: 1px solid #e2e8f0;
             }
             QTextEdit#helpMarkdownViewer {
-                border: 1px solid #dbe3ff;
-                border-radius: 10px;
+                font-family: __DLG_HELP_FF__;
+                border: none;
+                border-radius: 8px;
                 background: #ffffff;
-                padding: 12px 14px;
+                padding: 18px 20px 22px 20px;
                 selection-background-color: #dbeafe;
-                color: #0f172a;
+                selection-color: #0f172a;
+                color: #334155;
+            }
+            QTextEdit#helpMarkdownViewer QScrollBar:vertical {
+                width: 6px;
+                background: transparent;
+                margin: 4px 2px 4px 0;
+                border: none;
+            }
+            QTextEdit#helpMarkdownViewer QScrollBar::handle:vertical {
+                min-height: 36px;
+                background: #cbd5e1;
+                border-radius: 4px;
+            }
+            QTextEdit#helpMarkdownViewer QScrollBar::handle:vertical:hover {
+                background: #94a3b8;
+            }
+            QTextEdit#helpMarkdownViewer QScrollBar::add-line:vertical,
+            QTextEdit#helpMarkdownViewer QScrollBar::sub-line:vertical {
+                height: 0;
+                width: 0;
+            }
+            QFrame#helpTocPanel {
+                background: rgba(255, 255, 255, 0.92);
+                border: 1px solid #e2e8f0;
+                border-radius: 10px;
+            }
+            QLabel#helpTocTitle {
+                font-family: __DLG_HELP_FF__;
+                color: #475569;
+                font-weight: 600;
                 font-size: 13px;
-                line-height: 1.65;
+                letter-spacing: 0.02em;
+                padding: 0;
+            }
+            QTreeWidget#helpTocTree {
+                font-family: __DLG_HELP_FF__;
+                border: none;
+                background: transparent;
+                padding: 0;
+                font-size: 12px;
+                color: #475569;
+                outline: none;
+            }
+            QTreeWidget#helpTocTree::item {
+                padding: 4px 5px;
+                border-radius: 6px;
+                min-height: 20px;
+            }
+            QTreeWidget#helpTocTree::item:hover {
+                background: #f1f5f9;
+                color: #0f172a;
+            }
+            QTreeWidget#helpTocTree::item:selected {
+                background: #eff6ff;
+                color: #1d4ed8;
+                border: none;
+                border-left: 3px solid #3b82f6;
+                padding-left: 3px;
+            }
+            QTreeWidget#helpTocTree QScrollBar:vertical {
+                width: 5px;
+                background: transparent;
+                margin: 2px 0;
+            }
+            QTreeWidget#helpTocTree QScrollBar::handle:vertical {
+                min-height: 24px;
+                background: #e2e8f0;
+                border-radius: 3px;
+            }
+            QTreeWidget#helpTocTree QScrollBar::handle:vertical:hover {
+                background: #cbd5e1;
+            }
+            QTreeWidget#helpTocTree QScrollBar::add-line:vertical,
+            QTreeWidget#helpTocTree QScrollBar::sub-line:vertical {
+                height: 0;
             }
             QPushButton#helpNavBtn {
-                min-height: 40px;
-                padding: 0 16px;
+                font-family: __DLG_HELP_FF__;
+                min-height: 36px;
+                padding: 0 14px;
                 border-radius: 10px;
                 border: 1px solid transparent;
                 background: transparent;
-                color: #334155;
-                font-weight: 700;
-                font-size: 15px;
+                color: #475569;
+                font-weight: 600;
+                font-size: 14px;
                 text-align: left;
             }
             QPushButton#helpNavBtn:hover {
-                background: #eef2ff;
-                border-color: #c7d2fe;
-                color: #1e3a8a;
+                background: #f8fafc;
+                border-color: #e2e8f0;
+                color: #1e293b;
             }
             QPushButton#helpNavBtn:checked {
-                background: #e0e7ff;
-                border: 1px solid #93c5fd;
-                color: #1d4ed8;
-                font-weight: 700;
+                background: #eef2ff;
+                border: 1px solid #c7d2fe;
+                color: #4338ca;
+                font-weight: 600;
             }
-        """)
+        """.replace("__DLG_HELP_FF__", _dlg_help_ff))
         dlg.exec()
 
     @staticmethod
@@ -6132,7 +6541,7 @@ class EnhancedDetectionUI(QMainWindow):
         model = self.model_combo.currentText() if hasattr(
             self, "model_combo") else "-"
         self._history_last_snapshot = {
-            "time_str": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "time_str": _format_export_local_time(),
             "task_type": self._history_task_type_label(),
             "source": self._history_source_summary(),
             "model": model,
@@ -6176,7 +6585,7 @@ class EnhancedDetectionUI(QMainWindow):
             "incomplete": "检测未完成",
         }.get(reason, str(reason))
 
-        end_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        end_ts = _format_export_local_time()
         parts = []
         sum_inf = float(self._history_run_sum_infer_s or 0.0)
         if reason in ("error", "incomplete"):
@@ -7205,7 +7614,7 @@ class EnhancedDetectionUI(QMainWindow):
         model = self.model_combo.currentText() if hasattr(
             self, "model_combo") else "-"
         self._history_last_snapshot = {
-            "time_str": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "time_str": _format_export_local_time(),
             "task_type": self._history_task_type_label(),
             "source": self._history_source_summary(),
             "model": model,
@@ -7228,7 +7637,7 @@ class EnhancedDetectionUI(QMainWindow):
         )
         if getattr(self, "current_source_type", None) in ("video", "camera"):
             self._video_export_frame_index += 1
-            self._video_export_ended_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._video_export_ended_at = _format_export_local_time()
         try:
             self._history_run_sum_infer_s += float(inference_time)
         except Exception:
@@ -7370,7 +7779,7 @@ class EnhancedDetectionUI(QMainWindow):
                           for r in self.batch_results)
             avg_inf = sum_inf / total_count
             src = (self.current_source_path or "").strip() or "-"
-            ended = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ended = _format_export_local_time()
             avg_fps = (
                 float(total_count) / max(float(sum_inf), 1e-9)
                 if total_count > 0 else 0.0)
@@ -7530,7 +7939,7 @@ class EnhancedDetectionUI(QMainWindow):
         self._video_time_overlay = None
         if getattr(self, "current_source_type", None) in ("video", "camera"):
             if not self._video_export_ended_at:
-                self._video_export_ended_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self._video_export_ended_at = _format_export_local_time()
         try:
             self._flush_history_task_snapshot()
         except Exception:
@@ -7663,7 +8072,7 @@ class EnhancedDetectionUI(QMainWindow):
 
     def save_detection_report(self, result_dir):
         """批量保存时导出“检测明细”同款数据（CSV/JSON）。"""
-        export_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        export_time = _format_export_local_time()
         total_images = len(self.batch_results)
         total_objects = sum(int(r.get("object_count", 0))
                             for r in self.batch_results)
