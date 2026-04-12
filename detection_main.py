@@ -350,14 +350,16 @@ class ModelSelectionDialog(QDialog):
     PATH_COL = 3
     STATUS_COL = 4
     ACTION_COL = 5
-    OP_COL_W = 132
-    OP_ROW_H = 36
-    OP_BTN_H = 24
+    OP_COL_W = 168
+    OP_ROW_H = 38
+    OP_BTN_H = 26
 
     COLUMN_HEADERS_LOCAL = ["模型名称", "大小", "修改时间", "路径"]
     COLUMN_HEADERS_NETWORK = ["模型名称", "大小(MB)", "修改时间", "类别数量", "状态", "操作"]
     COLUMN_HEADERS_OFFICIAL_NETWORK = [
         "模型名称", "大小(MB)", "修改时间", "类别数量", "状态", "操作"]
+    PRIVATE_RELEASE_REPO = "Alaskaboo/DimensionTeam_object_detection"
+    PRIVATE_RELEASE_TAG = "train_weights"
 
     def __init__(self, model_manager, parent=None):
         super().__init__(parent)
@@ -490,7 +492,7 @@ class ModelSelectionDialog(QDialog):
         layout = QVBoxLayout(self.network_tab)
 
         # 下载路径组
-        path_group = QGroupBox("路径设置")
+        path_group = QGroupBox("下载路径")
         path_group.setObjectName("modelSelectGroup")
         path_layout = QHBoxLayout(path_group)
 
@@ -948,7 +950,8 @@ class ModelSelectionDialog(QDialog):
             default_cf.setForeground(QColor("#1e293b"))
             default_cf.setFontWeight(QFont.Weight.Normal)
 
-            heading_sizes = {1: 30.0, 2: 24.0, 3: 20.0, 4: 18.0, 5: 17.0, 6: 16.0}
+            heading_sizes = {1: 30.0, 2: 24.0,
+                             3: 20.0, 4: 18.0, 5: 17.0, 6: 16.0}
             heading_weights = {
                 1: QFont.Weight.Bold,
                 2: QFont.Weight.DemiBold,
@@ -970,7 +973,8 @@ class ModelSelectionDialog(QDialog):
                 if level > 0:
                     lv = max(1, min(6, level))
                     cf.setFontPointSize(heading_sizes.get(lv, 18.0))
-                    cf.setFontWeight(heading_weights.get(lv, QFont.Weight.Medium))
+                    cf.setFontWeight(heading_weights.get(
+                        lv, QFont.Weight.Medium))
                     cf.setForeground(QColor("#0f172a"))
                     if lv == 1:
                         bf.setTopMargin(10)
@@ -1060,7 +1064,8 @@ class ModelSelectionDialog(QDialog):
                 if idx is not None and int(idx) == active_idx:
                     toc_tree.blockSignals(True)
                     toc_tree.setCurrentItem(cur)
-                    toc_tree.scrollToItem(cur, QAbstractItemView.ScrollHint.EnsureVisible)
+                    toc_tree.scrollToItem(
+                        cur, QAbstractItemView.ScrollHint.EnsureVisible)
                     toc_tree.blockSignals(False)
                     return
                 it += 1
@@ -1356,7 +1361,16 @@ class ModelSelectionDialog(QDialog):
                 self, "错误", f"加载{label}模型数据失败: {str(e)}")
 
     def load_network_models(self):
-        """加载网络模型数据"""
+        """加载网络模型数据（优先实时读取 GitHub Release assets，失败回退 CSV）。"""
+        try:
+            models = self._fetch_private_release_assets()
+            if models:
+                self.network_models = models
+                self.refresh_network_models()
+                return
+        except Exception:
+            # 实时读取失败时回退到 CSV，避免界面不可用。
+            pass
         self._load_models_csv(
             "pt_files_report.csv",
             "network_models",
@@ -1387,6 +1401,64 @@ class ModelSelectionDialog(QDialog):
                 continue
         return []
 
+    def _fetch_private_release_assets(self) -> list[dict]:
+        """从 GitHub Release 读取私有模型资产列表。"""
+        api_url = (
+            f"https://api.github.com/repos/{self.PRIVATE_RELEASE_REPO}/"
+            f"releases/tags/{self.PRIVATE_RELEASE_TAG}"
+        )
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "DimensionTeam-object-detection",
+        }
+        resp = requests.get(api_url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        payload = resp.json() if isinstance(resp.json(), dict) else {}
+        assets = payload.get("assets", []) if isinstance(payload, dict) else []
+        if not isinstance(assets, list):
+            return []
+
+        # CSV 中可能包含类别统计信息，优先合并进实时资产列表。
+        meta_map: dict[str, dict] = {}
+        csv_path = base_dir / "csv_reports" / "pt_files_report.csv"
+        if csv_path.exists():
+            for row in self._read_csv_with_encodings(csv_path):
+                name = str(row.get("文件名", "") or "").strip()
+                if name:
+                    meta_map[name] = row
+
+        def _fmt_mb(size_b: int) -> str:
+            mb = max(0.0, float(size_b) / (1024.0 * 1024.0))
+            s = f"{mb:.2f}".rstrip("0").rstrip(".")
+            return s if s else "0"
+
+        models: list[dict] = []
+        for a in assets:
+            if not isinstance(a, dict):
+                continue
+            name = str(a.get("name", "") or "")
+            if not name.lower().endswith(".pt"):
+                continue
+            size_mb = _fmt_mb(int(a.get("size", 0) or 0))
+            updated_raw = str(a.get("updated_at", "") or "")
+            try:
+                dt = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
+                modified = dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                modified = updated_raw
+
+            meta = meta_map.get(name, {})
+            models.append({
+                "文件名": name,
+                "大小(MB)": size_mb,
+                "修改日期": modified,
+                "类别数量": str(meta.get("类别数量", "-")),
+                "类别信息": str(meta.get("类别信息", "")),
+                "下载链接": str(a.get("browser_download_url", "") or ""),
+            })
+        return models
+
     def _populate_network_model_rows(
         self,
         models: list,
@@ -1397,8 +1469,11 @@ class ModelSelectionDialog(QDialog):
         """填充网络 / 官方网络模型表的共用逻辑。"""
         table.setRowCount(len(models))
         for row, model in enumerate(models):
-            table.setItem(
-                row, self.MODEL_NAME_COL, QTableWidgetItem(model['文件名']))
+            full_name = str(model.get('文件名', '') or '')
+            short_name = self._short_model_display_name(full_name)
+            name_item = QTableWidgetItem(short_name)
+            name_item.setToolTip(full_name)
+            table.setItem(row, self.MODEL_NAME_COL, name_item)
             table.setItem(
                 row, self.SIZE_COL, QTableWidgetItem(f"{model['大小(MB)']} MB"))
             table.setItem(
@@ -1416,6 +1491,16 @@ class ModelSelectionDialog(QDialog):
             status_item.setForeground(status_color)
             table.setItem(row, self.STATUS_COL, status_item)
             add_row_buttons(row, model)
+
+    @staticmethod
+    def _short_model_display_name(name: str, keep: int = 18) -> str:
+        """模型名过长时中间省略，保证表格可读性。"""
+        n = (name or "").strip()
+        if len(n) <= keep:
+            return n
+        head = max(6, keep // 2)
+        tail = max(6, keep - head - 1)
+        return f"{n[:head]}…{n[-tail:]}"
 
     def refresh_network_models(self):
         """刷新网络模型列表"""
@@ -1438,13 +1523,13 @@ class ModelSelectionDialog(QDialog):
     def _build_model_download_url(self, model_name, official=False):
         if official:
             return f"https://github.com/ultralytics/assets/releases/download/v8.4.0/{model_name}"
-        return f"https://github.com/JingW-ui/PI-MAPP/releases/download/pt_download/{model_name}"
+        return f"https://github.com/Alaskaboo/DimensionTeam_object_detection/releases/download/train_weights/{model_name}"
 
     def _create_model_operation_buttons(self, row, model, table, download_path_edit, download_handler, copy_handler):
         widget = QWidget()
         layout = QHBoxLayout(widget)
         layout.setContentsMargins(2, 1, 2, 1)
-        layout.setSpacing(4)
+        layout.setSpacing(6)
 
         download_btn = QPushButton("下载")
         download_btn.setObjectName("modelOpActionBtn")
@@ -1475,11 +1560,11 @@ class ModelSelectionDialog(QDialog):
             table.setRowHeight(row, self.OP_ROW_H)
 
     def _fit_model_op_button(self, btn: QPushButton, text: str):
-        """按按钮文本计算紧凑宽度，避免操作列出现过长按钮。"""
+        """按按钮文本计算按钮宽度，兼顾可读与不挤压。"""
         fm = btn.fontMetrics()
         text_w = fm.horizontalAdvance(text)
-        # 图标(12) + 间距 + 左右内边距 + 安全余量
-        w = max(48, int(text_w + 30))
+        # 图标 + 间距 + 左右内边距 + 安全余量
+        w = max(64, int(text_w + 38))
         btn.setFixedSize(w, self.OP_BTN_H)
 
     def _create_operation_buttons(self, row, model):
@@ -1497,18 +1582,22 @@ class ModelSelectionDialog(QDialog):
         )
 
     def _show_model_info_dialog(self, model, title):
+        class_info_raw = str(model.get('类别信息', '') or '')
         try:
-            class_info = ast.literal_eval(model['类别信息'])
+            class_info = ast.literal_eval(
+                class_info_raw) if class_info_raw else {}
             class_text = "\n".join(
                 [f"{k}: {v}" for k, v in class_info.items()])
-        except:
-            class_text = model['类别信息']
+            if not class_text:
+                class_text = "（暂无）"
+        except Exception:
+            class_text = class_info_raw or "（暂无）"
 
         info = (
-            f"模型名称: {model['文件名']}\n"
-            f"大小: {model['大小(MB)']} MB\n"
-            f"修改时间: {model['修改日期']}\n"
-            f"类别数量: {model['类别数量']}\n\n"
+            f"模型名称: {model.get('文件名', '-')}\n"
+            f"大小: {model.get('大小(MB)', '-')} MB\n"
+            f"修改时间: {model.get('修改日期', '-')}\n"
+            f"类别数量: {model.get('类别数量', '-')}\n\n"
             f"类别信息:\n{class_text}"
         )
         # 使用自定义对话框替代 QMessageBox，以支持最大高度与滚动显示
@@ -1594,8 +1683,12 @@ class ModelSelectionDialog(QDialog):
             status_item.setText("下载中...")
             status_item.setForeground(QColor("#f39c12"))
 
+            url = str(model.get("下载链接", "") or "")
+            if not url:
+                url = self._build_model_download_url(
+                    model_name, official=official)
             self._perform_download(
-                self._build_model_download_url(model_name, official=official), local_path)
+                url, local_path)
 
             status_item.setText("已下载")
             status_item.setForeground(QColor("#27ae60"))
@@ -1603,7 +1696,7 @@ class ModelSelectionDialog(QDialog):
             widget = table.cellWidget(row, self.ACTION_COL)
             for btn in widget.findChildren(QPushButton):
                 if "下载" in btn.text():
-                    btn.setText("✅ 已下载")
+                    btn.setText("已下载")
                     btn.setEnabled(False)
 
             QMessageBox.information(
@@ -1643,7 +1736,10 @@ class ModelSelectionDialog(QDialog):
     def _copy_model_download_link(self, model, success_text, official=False):
         if not model or '文件名' not in model:
             raise ValueError("模型数据无效")
-        url = self._build_model_download_url(model['文件名'], official=official)
+        url = str(model.get("下载链接", "") or "")
+        if not url:
+            url = self._build_model_download_url(
+                model['文件名'], official=official)
         QApplication.clipboard().setText(url)
         QMessageBox.information(self, "复制成功", success_text)
 
