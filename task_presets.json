@@ -3,7 +3,7 @@
     "model_name": "best.pt",
     "confidence_threshold": 0.47,
     "source_type": "image",
-    "source_path": "E:/Code/DimensionTeam_object_detection/test/00010.jpg",
+    "source_path": "E:/Code/DimensionTeam_object_detection/test_img/00010.jpg",
     "save_dir": "e:\\Code\\DimensionTeam_object_detection\\results",
     "camera_id": -1
   },
@@ -11,7 +11,7 @@
     "model_name": "best.pt",
     "confidence_threshold": 0.25,
     "source_type": "video",
-    "source_path": "E:/Code/DimensionTeam_object_detection/test/4K交通监控测试视频，需要自取！.mp4",
+    "source_path": "E:/Code/DimensionTeam_object_detection/test_img/747867635-1-192.mp4",
     "save_dir": "e:\\Code\\DimensionTeam_object_detection\\results",
     "camera_id": -1
   }

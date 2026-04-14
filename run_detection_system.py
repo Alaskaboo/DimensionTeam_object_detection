@@ -51,11 +51,11 @@ def check_dependencies():
 def create_directories():
     """创建必要的目录"""
     directories = [
-        "pt_models",
         "models",
-        "weights",
+        "models/custom",
+        "models/official",
         "results",
-        "logs"
+        "logs",
     ]
 
     for directory in directories:

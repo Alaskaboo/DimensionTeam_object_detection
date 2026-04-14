@@ -27,6 +27,11 @@ else:
     # 开发环境
     base_dir = Path(__file__).parent
 
+# 权重目录：统一在 models/ 下管理 .pt；子目录仅区分来源，列表扫描会递归收录。
+MODELS_ROOT = base_dir / "models"
+MODELS_DIR_CUSTOM = MODELS_ROOT / "custom"
+MODELS_DIR_OFFICIAL = MODELS_ROOT / "official"
+
 from theme_icons import ThemeIcons
 from task_history_store import TaskHistoryStore
 
@@ -337,6 +342,48 @@ class MultiCameraMonitorThread(QThread):
             self._reconnect_later(cid)
 
 
+class ModelFileDownloadThread(QThread):
+    """在后台线程下载 .pt，避免长时间占用 GUI 主线程导致界面卡顿。"""
+
+    finished_ok = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, url: str, save_path: Path, chunk_size: int = 512 * 1024):
+        super().__init__()
+        self._url = url
+        self._save_path = Path(save_path)
+        self._chunk_size = max(8192, int(chunk_size))
+
+    def run(self):
+        part_path = self._save_path.with_suffix(self._save_path.suffix + ".part")
+        try:
+            with requests.get(
+                self._url,
+                stream=True,
+                timeout=(30, 600),
+            ) as response:
+                response.raise_for_status()
+                with open(part_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=self._chunk_size):
+                        if self.isInterruptionRequested():
+                            raise RuntimeError("下载已取消")
+                        if chunk:
+                            f.write(chunk)
+            if self.isInterruptionRequested():
+                raise RuntimeError("下载已取消")
+            if self._save_path.exists():
+                self._save_path.unlink()
+            part_path.replace(self._save_path)
+            self.finished_ok.emit(str(self._save_path.resolve()))
+        except Exception as e:
+            try:
+                if part_path.exists():
+                    part_path.unlink()
+            except OSError:
+                pass
+            self.failed.emit(str(e))
+
+
 class ModelSelectionDialog(QDialog):
     """模型选择对话框"""
 
@@ -367,6 +414,7 @@ class ModelSelectionDialog(QDialog):
         self.selected_model = None
         self.network_models = []
         self.official_network_models = []
+        self._active_downloads = {}
         self.init_ui()
         self.load_network_models()
         self.load_official_network_models()
@@ -414,6 +462,16 @@ class ModelSelectionDialog(QDialog):
             ThemeIcons.icon("building", 17, "#6366f1"),
             "官方网络资源模型",
         )
+
+        self._download_toast = QLabel("")
+        self._download_toast.setObjectName("modelDownloadToast")
+        self._download_toast.setWordWrap(True)
+        self._download_toast.setVisible(False)
+        layout.addWidget(self._download_toast)
+        self._download_toast_timer = QTimer(self)
+        self._download_toast_timer.setSingleShot(True)
+        self._download_toast_timer.timeout.connect(
+            lambda: self._download_toast.setVisible(False))
 
         # 按钮区域
         button_box = QDialogButtonBox(
@@ -499,7 +557,7 @@ class ModelSelectionDialog(QDialog):
         self.download_path_edit = QLineEdit()
         self.download_path_edit.setObjectName("modelSelectPathEdit")
         self.download_path_edit.setText(
-            str((base_dir / "pt_models").absolute()))
+            str(MODELS_DIR_CUSTOM.absolute()))
         self.download_path_edit.setPlaceholderText("模型下载目录路径...")
         path_layout.addWidget(self.download_path_edit)
 
@@ -553,7 +611,7 @@ class ModelSelectionDialog(QDialog):
         self.official_download_path_edit = QLineEdit()
         self.official_download_path_edit.setObjectName("modelSelectPathEdit")
         self.official_download_path_edit.setText(
-            str((base_dir / "YOLO_pt").absolute()))
+            str(MODELS_DIR_OFFICIAL.absolute()))
         self.official_download_path_edit.setPlaceholderText("官方模型下载目录路径...")
         path_layout.addWidget(self.official_download_path_edit)
 
@@ -1658,12 +1716,106 @@ class ModelSelectionDialog(QDialog):
         self._exec_network_download_menu(
             self.official_network_table, self.download_official_network_model, pos)
 
+    def _flash_download_toast(self, html: str, kind: str = "ok") -> None:
+        """底部非阻塞提示：ok成功 / err 失败 / info 说明。"""
+        self._download_toast.setVisible(True)
+        if kind == "err":
+            border, bg = "#f87171", "#fef2f2"
+        elif kind == "info":
+            border, bg = "#93c5fd", "#eff6ff"
+        else:
+            border, bg = "#34d399", "#ecfdf5"
+        self._download_toast.setStyleSheet(f"""
+            QLabel#modelDownloadToast {{
+                background-color: {bg};
+                border: 1px solid {border};
+                border-radius: 8px;
+                padding: 10px 14px;
+                font-size: 13px;
+                color: #111827;
+            }}
+        """)
+        self._download_toast.setText(html)
+        self._download_toast_timer.start(9000 if kind == "err" else 6500)
+
+    def _update_download_window_title_badge(self) -> None:
+        n = sum(1 for t in self._active_downloads.values() if t.isRunning())
+        if n:
+            self.setWindowTitle(f"高级模型选择 — 下载中 ({n})")
+        else:
+            self.setWindowTitle("高级模型选择")
+
+    def _on_download_thread_cleanup(
+        self, task_key, thread: ModelFileDownloadThread
+    ) -> None:
+        if self._active_downloads.get(task_key) is thread:
+            del self._active_downloads[task_key]
+        self._update_download_window_title_badge()
+
+    def _on_model_download_success(
+        self,
+        row: int,
+        table: QTableWidget,
+        model_name: str,
+        download_done_text: str,
+        path_str: str,
+    ) -> None:
+        status_item = table.item(row, self.STATUS_COL)
+        if status_item:
+            status_item.setText("已下载")
+            status_item.setForeground(QColor("#27ae60"))
+        widget = table.cellWidget(row, self.ACTION_COL)
+        if widget:
+            for btn in widget.findChildren(QPushButton):
+                if "下载" in btn.text():
+                    btn.setText("已下载")
+                    btn.setEnabled(False)
+        n = sum(1 for t in self._active_downloads.values() if t.isRunning())
+        extra = ""
+        if n > 1:
+            extra = (
+                f"<br/><span style='color:#6b7280;font-size:12px;'>"
+                f"另有约 {n - 1} 个任务进行中（见标题栏计数）</span>"
+            )
+        self._flash_download_toast(
+            f"<b>已完成</b> · {download_done_text} {model_name}{extra}"
+            f"<br/><span style='color:#4b5563;font-size:12px;'>{path_str}</span>",
+            "ok",
+        )
+
+    def _on_model_download_failed(
+        self, row: int, table: QTableWidget, model_name: str, msg: str
+    ) -> None:
+        status_item = table.item(row, self.STATUS_COL)
+        if status_item:
+            if "取消" in msg:
+                status_item.setText("未下载")
+            else:
+                status_item.setText("下载失败")
+            status_item.setForeground(QColor("#e74c3c"))
+        if "取消" in msg:
+            self._flash_download_toast(
+                f"<b>已中断</b><br/>{model_name}", "info")
+        else:
+            self._flash_download_toast(
+                f"<b>下载失败</b> · {model_name}"
+                f"<br/><span style='font-size:12px;'>{msg}</span>",
+                "err",
+            )
+
     def _download_model_by_row(self, row, models, table, download_path_edit, download_done_text, official=False):
         if row >= len(models):
             return
 
         model = models[row]
         model_name = model['文件名']
+        task_key = (id(table), model_name)
+        existing = self._active_downloads.get(task_key)
+        if existing is not None and existing.isRunning():
+            self._flash_download_toast(
+                f"<b>请勿重复</b><br/>「{model_name}」已在下载中。", "info")
+            return
+
         download_dir = Path(download_path_edit.text())
 
         try:
@@ -1680,35 +1832,47 @@ class ModelSelectionDialog(QDialog):
                     return
 
             status_item = table.item(row, self.STATUS_COL)
-            status_item.setText("下载中...")
-            status_item.setForeground(QColor("#f39c12"))
+            if status_item:
+                status_item.setText("下载中...")
+                status_item.setForeground(QColor("#f39c12"))
 
             url = str(model.get("下载链接", "") or "")
             if not url:
                 url = self._build_model_download_url(
                     model_name, official=official)
-            self._perform_download(
-                url, local_path)
 
-            status_item.setText("已下载")
-            status_item.setForeground(QColor("#27ae60"))
-
-            widget = table.cellWidget(row, self.ACTION_COL)
-            for btn in widget.findChildren(QPushButton):
-                if "下载" in btn.text():
-                    btn.setText("已下载")
-                    btn.setEnabled(False)
-
-            QMessageBox.information(
-                self, "下载完成",
-                f"{download_done_text} {model_name} 下载完成！\n保存路径: {local_path}"
+            thread = ModelFileDownloadThread(url, local_path)
+            self._active_downloads[task_key] = thread
+            thread.finished_ok.connect(
+                functools.partial(
+                    self._on_model_download_success,
+                    row,
+                    table,
+                    model_name,
+                    download_done_text,
+                )
             )
+            thread.failed.connect(
+                functools.partial(
+                    self._on_model_download_failed,
+                    row,
+                    table,
+                    model_name,
+                )
+            )
+            thread.finished.connect(
+                functools.partial(
+                    self._on_download_thread_cleanup, task_key, thread))
+            self._update_download_window_title_badge()
+            thread.start()
 
         except Exception as e:
             status_item = table.item(row, self.STATUS_COL)
-            status_item.setText("下载失败")
-            status_item.setForeground(QColor("#e74c3c"))
-            QMessageBox.critical(self, "下载失败", f"错误: {str(e)}")
+            if status_item:
+                status_item.setText("下载失败")
+                status_item.setForeground(QColor("#e74c3c"))
+            self._flash_download_toast(
+                f"<b>无法开始下载</b><br/>{str(e)}", "err")
 
     def download_network_model(self, row):
         """下载网络模型"""
@@ -1722,16 +1886,6 @@ class ModelSelectionDialog(QDialog):
             row, self.official_network_models, self.official_network_table,
             self.official_download_path_edit, "官方模型", official=True
         )
-
-    def _perform_download(self, url, save_path):
-        """执行实际的下载操作"""
-        response = requests.get(url, stream=True, timeout=30)
-        response.raise_for_status()
-
-        with open(save_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
 
     def _copy_model_download_link(self, model, success_text, official=False):
         if not model or '文件名' not in model:
@@ -1758,6 +1912,28 @@ class ModelSelectionDialog(QDialog):
                 model, "官方模型下载链接已复制到剪贴板", official=True)
         except Exception as e:
             QMessageBox.critical(self, "复制失败", f"错误: {str(e)}")
+
+    def closeEvent(self, event):
+        active = [t for t in self._active_downloads.values() if t.isRunning()]
+        if active:
+            reply = QMessageBox.question(
+                self,
+                "正在下载",
+                f"当前有 {len(active)} 个模型正在下载，确定关闭？\n"
+                "关闭后将尝试中断所有任务并删除临时文件。",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.No:
+                event.ignore()
+                return
+            for t in active:
+                t.requestInterruption()
+            for t in active:
+                t.wait(8000)
+            self._active_downloads.clear()
+            self._update_download_window_title_badge()
+        event.accept()
 
     def accept(self):
         """确认选择模型"""
@@ -3703,33 +3879,49 @@ class StyleManager:
                 border-color: #e2e8f0;
             }
 
-            /* 高级模型：默认白底靛字，悬停渐变底白字（与任务预设小按钮一致） */
-            QPushButton#advancedModelBtn {
+            /* 任务控制标题栏齿轮 + 模型行刷新按钮 */
+            QToolButton#taskCardHeaderSettingsBtn {
+                background: transparent;
+                border: none;
+                border-radius: 8px;
+                padding: 4px;
+                min-width: 30px;
+                max-width: 30px;
+                min-height: 30px;
+                max-height: 30px;
+            }
+            QToolButton#taskCardHeaderSettingsBtn:hover {
+                background: #e0e7ff;
+            }
+            QToolButton#taskCardHeaderSettingsBtn:pressed {
+                background: #c7d2fe;
+            }
+            QToolButton#taskCardHeaderSettingsBtn:disabled {
+                background: transparent;
+            }
+            QToolButton#modelRefreshBtn {
                 background: #ffffff;
                 border: 1px solid #e2e8f0;
                 border-radius: 10px;
-                color: #6366f1;
-                font-size: 12px;
-                font-weight: 600;
-                padding: 4px 10px;
+                padding: 4px;
+                min-width: 32px;
+                max-width: 32px;
                 min-height: 32px;
+                max-height: 32px;
             }
-            QPushButton#advancedModelBtn:hover {
+            QToolButton#modelRefreshBtn:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #a5b4fc, stop:1 #818cf8);
                 border: none;
-                color: #ffffff;
             }
-            QPushButton#advancedModelBtn:pressed {
+            QToolButton#modelRefreshBtn:pressed {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #6366f1, stop:1 #4f46e5);
                 border: none;
-                color: #ffffff;
             }
-            QPushButton#advancedModelBtn:disabled {
+            QToolButton#modelRefreshBtn:disabled {
                 background: #e2e8f0;
-                color: #94a3b8;
-                border: 1px solid #e2e8f0;
+                border-color: #e2e8f0;
             }
 
             QSlider#confThresholdSlider::groove:horizontal {
@@ -4628,6 +4820,89 @@ class StyleManager:
                 height: 12px;
             }
 
+            /* 模型下拉：与置信度 spin右侧条同宽、同底色；弹出列表限高+滚动条 */
+            QComboBox#modelComboField {
+                padding: 6px 24px 6px 10px;
+            }
+            QComboBox#modelComboField::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 20px;
+                border: none;
+                border-left: 1px solid #e2e8f0;
+                background: #f8fafc;
+                border-top-right-radius: 10px;
+                border-bottom-right-radius: 10px;
+            }
+            QComboBox#modelComboField::drop-down:hover {
+                background: #eef2ff;
+            }
+            QComboBox#modelComboField::drop-down:pressed {
+                background: #e0e7ff;
+            }
+            QComboBox#modelComboField::down-arrow {
+                width: 10px;
+                height: 10px;
+            }
+            QComboBox#modelComboField QAbstractItemView {
+                border: 1px solid #e2e8f0;
+                border-radius: 10px;
+                background: #ffffff;
+                padding: 4px;
+                outline: none;
+                selection-background-color: #e0e7ff;
+                selection-color: #0f172a;
+            }
+            QComboBox#modelComboField QAbstractItemView::item {
+                min-height: 28px;
+                padding: 4px 8px;
+                border-radius: 8px;
+            }
+            QComboBox#modelComboField QAbstractItemView::item:hover {
+                background: #f1f5f9;
+            }
+            QComboBox#modelComboField QAbstractItemView QScrollBar:vertical {
+                width: 20px;
+                background: #f8fafc;
+                border: none;
+                border-left: 1px solid #e2e8f0;
+                margin: 0;
+            }
+            QComboBox#modelComboField QAbstractItemView QScrollBar::handle:vertical {
+                background: #cbd5e1;
+                border-radius: 5px;
+                min-height: 28px;
+                margin: 3px 4px 3px 3px;
+            }
+            QComboBox#modelComboField QAbstractItemView QScrollBar::handle:vertical:hover {
+                background: #a5b4fc;
+            }
+            QComboBox#modelComboField QAbstractItemView QScrollBar::add-line:vertical,
+            QComboBox#modelComboField QAbstractItemView QScrollBar::sub-line:vertical {
+                height: 22px;
+                subcontrol-origin: margin;
+                border: none;
+                background: #f8fafc;
+            }
+            QComboBox#modelComboField QAbstractItemView QScrollBar::add-line:vertical:hover,
+            QComboBox#modelComboField QAbstractItemView QScrollBar::sub-line:vertical:hover {
+                background: #eef2ff;
+            }
+            QComboBox#modelComboField QAbstractItemView QScrollBar::add-line:vertical:pressed,
+            QComboBox#modelComboField QAbstractItemView QScrollBar::sub-line:vertical:pressed {
+                background: #e0e7ff;
+            }
+            QComboBox#modelComboField QAbstractItemView QScrollBar::up-arrow {
+                image: url("./assets/icons/chevron_up_dark.svg");
+                width: 10px;
+                height: 10px;
+            }
+            QComboBox#modelComboField QAbstractItemView QScrollBar::down-arrow {
+                image: url("./assets/icons/chevron_down_dark.svg");
+                width: 10px;
+                height: 10px;
+            }
+
             QProgressBar {
                 border: 1px solid #e2e8f0;
                 border-radius: 8px;
@@ -4946,35 +5221,37 @@ class ModelManager:
     """模型管理器 - 处理模型扫描和加载"""
 
     def __init__(self):
-        self.models_paths = [
-            base_dir / "pt_models",
-            base_dir / "models",
-            base_dir / "weights",
-        ]
+        self.models_roots: list[Path] = [MODELS_ROOT]
         self.current_model = None
         self.class_names = []
 
     def scan_models(self, custom_path=None):
-        """扫描模型文件"""
-        models = []
-        search_paths = self.models_paths.copy()
-
-        if custom_path and Path(custom_path).exists():
-            search_paths.insert(0, Path(custom_path))
-
-        for model_dir in search_paths:
-            if model_dir.exists():
-                try:
-                    pt_files = sorted(model_dir.glob("*.pt"))
-                    for pt_file in pt_files:
-                        models.append({
-                            'name': pt_file.name,
-                            'path': str(pt_file),
-                            'size': self._get_file_size(pt_file),
-                            'modified': self._get_modification_time(pt_file)
-                        })
-                except Exception as e:
-                    print(f"扫描目录 {model_dir} 时出错: {e}")
+        """扫描模型文件（递归子目录，多根目录去重）。"""
+        models: list[dict] = []
+        seen_resolved: set[Path] = set()
+        roots: list[Path] = []
+        if custom_path and str(custom_path).strip():
+            cp = Path(custom_path).expanduser()
+            if cp.is_dir():
+                roots.append(cp.resolve())
+        for r in self.models_roots:
+            if r.is_dir():
+                roots.append(r.resolve())
+        for root in roots:
+            try:
+                for pt_file in sorted(root.rglob("*.pt")):
+                    key = pt_file.resolve()
+                    if key in seen_resolved:
+                        continue
+                    seen_resolved.add(key)
+                    models.append({
+                        'name': pt_file.name,
+                        'path': str(pt_file),
+                        'size': self._get_file_size(pt_file),
+                        'modified': self._get_modification_time(pt_file)
+                    })
+            except Exception as e:
+                print(f"扫描目录 {root} 时出错: {e}")
 
         return models
 
@@ -5316,9 +5593,6 @@ class EnhancedDetectionUI(QMainWindow):
                 StyleManager.log_mono_font(10 * s))
         if hasattr(self, "conf_spinbox"):
             self.conf_spinbox.setFixedWidth(max(56, int(round(72 * s))))
-        adv = getattr(self, "advanced_model_btn", None)
-        if adv is not None:
-            adv.setFixedWidth(max(72, int(round(90 * s))))
         # 顶部角标运行区：随字号缩放同步高度，防止按钮被 Tab 顶栏裁切
         compact_h = max(34, int(round(34 * min(s, 1.15))))
         corner_h = max(40, int(round(40 * min(s, 1.15))))
@@ -5455,6 +5729,8 @@ class EnhancedDetectionUI(QMainWindow):
         # 首次启动时同步：主 Tab 与输入源下拉保持单一状态来源
         if hasattr(self, "tab_widget"):
             self._sync_source_options_for_tab(self.tab_widget.currentIndex())
+
+        self._setup_model_dir_watcher()
 
         # 尝试加载默认模型
         self.try_load_default_model()
@@ -6003,7 +6279,8 @@ class EnhancedDetectionUI(QMainWindow):
         tv = QVBoxLayout(task)
         tv.setContentsMargins(0, 0, 0, 0)
         tv.setSpacing(0)
-        tv.addWidget(self._wireframe_card_header("任务控制", "settings"))
+        tv.addWidget(self._wireframe_card_header(
+            "任务控制", "settings", header_settings_btn=True))
         task_body = QWidget()
         tb = QVBoxLayout(task_body)
         tb.setContentsMargins(10, 12, 10, 12)
@@ -6016,21 +6293,23 @@ class EnhancedDetectionUI(QMainWindow):
         self.model_combo.setObjectName("modelComboField")
         self.model_combo.setMinimumWidth(96)
         self.model_combo.setMinimumHeight(32)
+        self.model_combo.setMaxVisibleItems(10)
+        self.model_combo.view().setUniformItemSizes(True)
+        self.model_combo.view().setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.model_combo.currentTextChanged.connect(self.on_model_changed)
         self.init_model_combo()
         r_model.addWidget(self.model_combo, 1)
-        self.advanced_model_btn = QPushButton("高级")
-        self.advanced_model_btn.setObjectName("advancedModelBtn")
-        self._set_btn_icon_keep_color(
-            self.advanced_model_btn, "settings", "#6366f1", 16)
-        self.advanced_model_btn.clicked.connect(
-            self.show_model_selection_dialog)
-        self.advanced_model_btn.setFixedWidth(90)
-        self.advanced_model_btn.setMinimumHeight(32)
-        self.advanced_model_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.advanced_model_btn.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
-        self.advanced_model_btn.installEventFilter(self)
-        r_model.addWidget(self.advanced_model_btn)
+        self.model_refresh_btn = QToolButton()
+        self.model_refresh_btn.setObjectName("modelRefreshBtn")
+        self.model_refresh_btn.setIcon(
+            ThemeIcons.icon("refresh", 18, "#6366f1"))
+        self.model_refresh_btn.setIconSize(QSize(18, 18))
+        self.model_refresh_btn.setAutoRaise(True)
+        self.model_refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.model_refresh_btn.setToolTip("重新扫描模型目录（也可在保存目录变更后自动刷新）")
+        self.model_refresh_btn.clicked.connect(self.refresh_model_combo)
+        r_model.addWidget(self.model_refresh_btn, 0)
         tb.addLayout(r_model)
 
         r_conf = QHBoxLayout()
@@ -6428,8 +6707,10 @@ class EnhancedDetectionUI(QMainWindow):
         main_v.addWidget(top_scroll, 1)
         return col
 
-    def _wireframe_card_header(self, title: str, icon_name: str):
-        """线框稿卡片顶栏：标题占位条 + 文案 + 右侧图标。"""
+    def _wireframe_card_header(
+        self, title: str, icon_name: str, header_settings_btn: bool = False
+    ):
+        """线框稿卡片顶栏：标题占位条 + 文案 + 右侧图标（可选可点击齿轮）。"""
         head = QFrame()
         head.setObjectName("wireframeCardHeader")
         hl = QHBoxLayout(head)
@@ -6443,9 +6724,21 @@ class EnhancedDetectionUI(QMainWindow):
         tit.setObjectName("wfCardTitle")
         hl.addWidget(tit, 0, Qt.AlignVCenter)
         hl.addStretch()
-        ic = QLabel()
-        ic.setPixmap(ThemeIcons.pixmap(icon_name, 18, "#64748b"))
-        hl.addWidget(ic, 0, Qt.AlignVCenter)
+        if header_settings_btn:
+            btn = QToolButton()
+            btn.setObjectName("taskCardHeaderSettingsBtn")
+            btn.setIcon(ThemeIcons.icon(icon_name, 18, "#64748b"))
+            btn.setIconSize(QSize(18, 18))
+            btn.setAutoRaise(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip("高级模型选择（浏览、下载与管理权重）")
+            btn.clicked.connect(self.show_model_selection_dialog)
+            self.task_control_header_settings_btn = btn
+            hl.addWidget(btn, 0, Qt.AlignVCenter)
+        else:
+            ic = QLabel()
+            ic.setPixmap(ThemeIcons.pixmap(icon_name, 18, "#64748b"))
+            hl.addWidget(ic, 0, Qt.AlignVCenter)
         return head
 
     def _init_status_defaults(self):
@@ -6948,18 +7241,94 @@ class EnhancedDetectionUI(QMainWindow):
         return widget
 
     def init_model_combo(self):
-        """初始化模型下拉框"""
+        """首次填充模型下拉（不触发切换回调，由 try_load_default_model 加载）。"""
+        self.refresh_model_combo(reload_if_changed=False)
+
+    def _model_watch_directory_candidates(self):
+        """与扫描根目录一致，供 QFileSystemWatcher 监视（非递归，子目录变更多数仍会触发）。"""
+        seen = set()
+        out = []
+        for p in (
+            MODELS_ROOT,
+            MODELS_DIR_CUSTOM,
+            MODELS_DIR_OFFICIAL,
+        ):
+            try:
+                pr = Path(p).resolve()
+                key = str(pr)
+                if pr.is_dir() and key not in seen:
+                    seen.add(key)
+                    out.append(key)
+            except OSError:
+                continue
+        return out
+
+    def _setup_model_dir_watcher(self):
+        self._model_dir_watch = QFileSystemWatcher(self)
+        self._model_refresh_debounce = QTimer(self)
+        self._model_refresh_debounce.setSingleShot(True)
+        self._model_refresh_debounce.setInterval(420)
+        self._model_refresh_debounce.timeout.connect(
+            self._debounced_refresh_model_combo)
+        for d in self._model_watch_directory_candidates():
+            self._model_dir_watch.addPath(d)
+        self._model_dir_watch.directoryChanged.connect(
+            self._on_model_watch_dirs_changed)
+
+    def _on_model_watch_dirs_changed(self, _path: str):
+        self._model_refresh_debounce.start()
+
+    def _debounced_refresh_model_combo(self):
+        self.refresh_model_combo()
+
+    def refresh_model_combo(self, reload_if_changed: bool = True):
+        """重新扫描 .pt 并刷新下拉框；尽量保持当前选中名；必要时重新加载模型。"""
+        if not hasattr(self, "model_combo"):
+            return
+        prev_text = self.model_combo.currentText()
+        was_enabled = self.model_combo.isEnabled()
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
         models = self.model_manager.scan_models()
-
         if not models:
             self.model_combo.addItem("无可用模型")
             self.model_combo.setEnabled(False)
         else:
-            self.model_combo.addItems([model['name'] for model in models])
-            self.model_combo.setEnabled(True)
+            self.model_combo.addItems([m["name"] for m in models])
+            self.model_combo.setEnabled(was_enabled)
+            pick = None
+            if prev_text and prev_text != "无可用模型":
+                if self.model_combo.findText(prev_text) >= 0:
+                    pick = prev_text
+            if pick is None:
+                prev_path = getattr(self, "_loaded_model_path", "") or ""
+                if prev_path:
+                    try:
+                        bn = Path(prev_path).name
+                        if self.model_combo.findText(bn) >= 0:
+                            pick = bn
+                    except OSError:
+                        pass
+            if pick:
+                self.model_combo.setCurrentText(pick)
+            elif self.model_combo.count() > 0:
+                self.model_combo.setCurrentIndex(0)
         self.model_combo.blockSignals(False)
+        if not reload_if_changed:
+            return
+        new_text = self.model_combo.currentText()
+        if new_text == "无可用模型":
+            return
+        if new_text != prev_text:
+            self.on_model_changed(new_text)
+            return
+        prev_path = getattr(self, "_loaded_model_path", "") or ""
+        if prev_path and new_text == prev_text:
+            try:
+                if not Path(prev_path).is_file():
+                    self.on_model_changed(new_text)
+            except OSError:
+                self.on_model_changed(new_text)
 
     def try_load_default_model(self):
         """尝试加载默认模型"""
@@ -6995,20 +7364,18 @@ class EnhancedDetectionUI(QMainWindow):
         """显示模型选择对话框"""
         dialog = ModelSelectionDialog(self.model_manager, self)
         if dialog.exec() == QDialog.Accepted and dialog.selected_model:
-            model_name = Path(dialog.selected_model).name
-            # 先更新下拉框，避免触发重复加载
+            path = dialog.selected_model
+            model_name = Path(path).name
+            self.refresh_model_combo(reload_if_changed=False)
             self.model_combo.blockSignals(True)
-            index = self.model_combo.findText(model_name)
-            if index >= 0:
-                self.model_combo.setCurrentIndex(index)
+            ix = self.model_combo.findText(model_name)
+            if ix >= 0:
+                self.model_combo.setCurrentIndex(ix)
             else:
                 self.model_combo.addItem(model_name)
                 self.model_combo.setCurrentText(model_name)
             self.model_combo.blockSignals(False)
-
-            # 再加载模型
-            if self.load_model(dialog.selected_model):
-                pass  # 加载成功，已在load_model中记录日志
+            self.load_model(path)
 
     def refresh_camera_list(self):
         """刷新摄像头列表"""
@@ -7371,13 +7738,6 @@ class EnhancedDetectionUI(QMainWindow):
         color = "#ffffff" if hovered else "#6366f1"
         self._set_btn_icon_keep_color(btn, icon_name, color, 16)
 
-    def _apply_advanced_model_btn_icon_hover(self, hovered: bool):
-        btn = getattr(self, "advanced_model_btn", None)
-        if btn is None or not btn.isEnabled():
-            return
-        c = "#ffffff" if hovered else "#6366f1"
-        self._set_btn_icon_keep_color(btn, "settings", c, 16)
-
     def _reset_delete_preset_btn_surface_after_confirm(self):
         """清除确认删除的红底样式，并按是否仍悬停恢复图标颜色。"""
         btn = getattr(self, "delete_preset_btn", None)
@@ -7421,9 +7781,6 @@ class EnhancedDetectionUI(QMainWindow):
                 elif obj is dp and dp is not None:
                     self._apply_preset_tool_icon_for_toolbar_hover(
                         dp, "trash", hovered)
-                adv = getattr(self, "advanced_model_btn", None)
-                if obj is adv and adv is not None:
-                    self._apply_advanced_model_btn_icon_hover(hovered)
             if event.type() == QEvent.MouseButtonPress:
                 global_pos = event.globalPos()
                 # 历史来源路径：应用内点击路径框外部时恢复默认展示。
@@ -7626,6 +7983,12 @@ class EnhancedDetectionUI(QMainWindow):
         self.select_file_btn.setEnabled(
             not detecting and not is_monitor_tab and self.current_source_type != "camera")
         self.model_combo.setEnabled(not detecting)
+        tcs = getattr(self, "task_control_header_settings_btn", None)
+        if tcs is not None:
+            tcs.setEnabled(not detecting)
+        mrb = getattr(self, "model_refresh_btn", None)
+        if mrb is not None:
+            mrb.setEnabled(not detecting)
         self._sync_export_detail_button_state()
         self._update_header_pills()
 
