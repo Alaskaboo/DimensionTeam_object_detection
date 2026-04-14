@@ -19,18 +19,29 @@ from PySide6.QtGui import *
 from PySide6.QtWidgets import *
 from ultralytics import YOLO
 
-# 处理打包环境
+# 处理打包环境：资源目录与可写数据目录分离
 if getattr(sys, 'frozen', False):
-    # 打包环境
+    # 打包环境：资源在 _MEIPASS，可写数据放在 exe 同级目录
     base_dir = Path(sys._MEIPASS)
+    data_dir = Path(sys.executable).resolve().parent
 else:
-    # 开发环境
+    # 开发环境：资源与数据都在项目根目录
     base_dir = Path(__file__).parent
+    data_dir = base_dir
 
-# 权重目录：统一在 models/ 下管理 .pt；子目录仅区分来源，列表扫描会递归收录。
-MODELS_ROOT = base_dir / "models"
+# 权重目录：统一在外部 models/ 下管理 .pt；子目录仅区分来源，列表扫描会递归收录。
+MODELS_ROOT = data_dir / "models"
 MODELS_DIR_CUSTOM = MODELS_ROOT / "custom"
 MODELS_DIR_OFFICIAL = MODELS_ROOT / "official"
+RESULTS_DIR = data_dir / "results"
+LOGS_DIR = data_dir / "logs"
+
+# 确保外部可写目录存在（直接运行 detection_main.py 时也能正常工作）
+for _p in (MODELS_ROOT, MODELS_DIR_CUSTOM, MODELS_DIR_OFFICIAL, RESULTS_DIR, LOGS_DIR):
+    try:
+        _p.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
 
 from theme_icons import ThemeIcons
 from task_history_store import TaskHistoryStore
@@ -2343,6 +2354,24 @@ class TaskHistoryWidget(QWidget):
         host = getattr(self, "_history_table_scroll", None)
         if host is not None:
             host.set_content_width(total_w)
+        self._place_header_select_checkbox()
+
+    def _place_header_select_checkbox(self) -> None:
+        """将表头全选框定位在首列表头中心，保持与行内复选框同风格。"""
+        table = getattr(self, "table", None)
+        cb = getattr(self, "_header_select_all_cb", None)
+        if table is None or cb is None:
+            return
+        header = table.horizontalHeader()
+        if header is None:
+            return
+        x = header.sectionPosition(0) - int(header.offset())
+        w = int(table.columnWidth(0))
+        h = int(header.height())
+        ind = max(16, cb.sizeHint().height())
+        cb.resize(ind, ind)
+        cb.move(x + max(0, (w - ind) // 2), max(0, (h - ind) // 2))
+        cb.raise_()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -2364,16 +2393,6 @@ class TaskHistoryWidget(QWidget):
         self.prefs_btn.setMinimumHeight(32)
         self.prefs_btn.clicked.connect(self._on_prefs)
         bar.addWidget(self.prefs_btn, 0)
-
-        self.sel_all_btn = QPushButton("全选切换")
-        self.sel_all_btn.setObjectName("toolBtn")
-        self.sel_all_btn.setIcon(
-            ThemeIcons.icon("check_square", 16, "#6366f1"))
-        self.sel_all_btn.setIconSize(QSize(16, 16))
-        self.sel_all_btn.setMinimumHeight(32)
-        self.sel_all_btn.setToolTip("全选；再次点击可取消全部勾选")
-        self.sel_all_btn.clicked.connect(self._toggle_select_all)
-        bar.addWidget(self.sel_all_btn, 0)
 
         self.del_sel_btn = QPushButton("批量删除")
         self.del_sel_btn.setObjectName("toolBtn")
@@ -2408,6 +2427,9 @@ class TaskHistoryWidget(QWidget):
             if item:
                 item.setTextAlignment(
                     Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        sel_header = self.table.horizontalHeaderItem(0)
+        if sel_header is not None:
+            sel_header.setToolTip("全选/取消全选")
         self.table.verticalHeader().setVisible(False)
         self.table.setShowGrid(False)
         self.table.setAlternatingRowColors(True)
@@ -2425,6 +2447,16 @@ class TaskHistoryWidget(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.table.setHorizontalScrollMode(
             QAbstractItemView.ScrollMode.ScrollPerPixel)
+        header = self.table.horizontalHeader()
+        self._header_select_all_cb = QCheckBox(header)
+        self._header_select_all_cb.setObjectName("historyRowCheck")
+        self._header_select_all_cb.setTristate(False)
+        self._header_select_all_cb.setToolTip("全选/取消全选")
+        self._header_select_all_cb.stateChanged.connect(
+            self._on_header_checkbox_state_changed)
+        header.sectionResized.connect(lambda *_: self._place_header_select_checkbox())
+        header.sectionMoved.connect(lambda *_: self._place_header_select_checkbox())
+        self._place_header_select_checkbox()
         self._history_table_scroll = HistoryTableScrollHost(self.table)
         self._history_table_scroll.setObjectName("wfHistoryTableScroll")
         self._apply_history_column_geometry()
@@ -2633,18 +2665,50 @@ class TaskHistoryWidget(QWidget):
                 add_page_btn(int(p))
 
     def _toggle_select_all(self):
-        """单按钮切换：未全选时全选；已全选时全部取消。"""
-        boxes = []
-        for r in range(self.table.rowCount()):
-            wrap = self.table.cellWidget(r, 0)
-            cb = wrap.findChild(QCheckBox) if wrap is not None else None
-            if cb is not None:
-                boxes.append(cb)
+        """根据表头状态切换全选。"""
+        boxes = self._collect_row_checkboxes()
         if not boxes:
             return
         should_check_all = not all(cb.isChecked() for cb in boxes)
         for cb in boxes:
             cb.setChecked(should_check_all)
+        self._sync_header_checkbox_state()
+
+    def _collect_row_checkboxes(self) -> list[QCheckBox]:
+        boxes: list[QCheckBox] = []
+        for r in range(self.table.rowCount()):
+            wrap = self.table.cellWidget(r, 0)
+            cb = wrap.findChild(QCheckBox) if wrap is not None else None
+            if cb is not None:
+                boxes.append(cb)
+        return boxes
+
+    def _sync_header_checkbox_state(self) -> None:
+        """仅当全部选中时表头显示勾选；否则不勾选。"""
+        header_cb = getattr(self, "_header_select_all_cb", None)
+        if header_cb is None:
+            return
+        boxes = self._collect_row_checkboxes()
+        all_checked = bool(boxes) and all(cb.isChecked() for cb in boxes)
+        header_cb.blockSignals(True)
+        header_cb.setChecked(all_checked)
+        header_cb.blockSignals(False)
+
+    def _on_header_checkbox_state_changed(self, state) -> None:
+        boxes = self._collect_row_checkboxes()
+        if not boxes:
+            self._sync_header_checkbox_state()
+            return
+        # 兼容 PySide6 不同信号重载：state 可能是 Qt.CheckState 或 int
+        if isinstance(state, Qt.CheckState):
+            should_check = state == Qt.CheckState.Checked
+        else:
+            should_check = state == 2
+        for cb in boxes:
+            cb.blockSignals(True)
+            cb.setChecked(should_check)
+            cb.blockSignals(False)
+        self._sync_header_checkbox_state()
 
     def _delete_selected(self):
         ids = []
@@ -2695,6 +2759,7 @@ class TaskHistoryWidget(QWidget):
             self.table.insertRow(r)
             self._fill_row(r, row)
         self.table.blockSignals(False)
+        self._sync_header_checkbox_state()
         self._apply_history_column_geometry()
         self._refresh_pagination_ui()
 
@@ -2728,6 +2793,7 @@ class TaskHistoryWidget(QWidget):
         cb.setTristate(False)
         cb.setChecked(False)
         cb.setProperty("row_id", int(nid))
+        cb.stateChanged.connect(lambda _=0: self._sync_header_checkbox_state())
         cb_wrap = QWidget()
         cb_lay = QHBoxLayout(cb_wrap)
         cb_lay.setContentsMargins(0, 0, 0, 0)
@@ -2985,7 +3051,7 @@ class DetectionResultWidget(QWidget):
         save_path, _ = QFileDialog.getSaveFileName(
             self.window(),
             title,
-            str((base_dir / default_name).resolve()),
+            str((data_dir / default_name).resolve()),
             f"{filt};;所有文件 (*)",
         )
         if not save_path:
@@ -5521,7 +5587,7 @@ class EnhancedDetectionUI(QMainWindow):
         self.batch_detection_thread = None
         self.current_source_type = 'image'
         self.current_source_path = None
-        self.default_save_dir = str((base_dir / "results").absolute())
+        self.default_save_dir = str((data_dir / "results").absolute())
         self.confidence_threshold = 0.25
         self.batch_results = []
         self.current_batch_index = 0
@@ -5540,7 +5606,7 @@ class EnhancedDetectionUI(QMainWindow):
         self._tab_sync_source_change = False
         self.preset_data = {}
         self._delete_confirm_target = None
-        self.task_preset_file = base_dir / "task_presets.json"
+        self.task_preset_file = data_dir / "task_presets.json"
 
         # 管理器
         self.camera_manager = CameraManager()
@@ -7058,7 +7124,7 @@ class EnhancedDetectionUI(QMainWindow):
             batch_tab, ThemeIcons.icon("folders", 17, "#0ea5e9"), "批量分析")
         self.tab_widget.addTab(
             self.monitor_tab, ThemeIcons.icon("monitor", 17, "#0ea5e9"), "设备监控")
-        self.task_history_widget = TaskHistoryWidget(base_dir)
+        self.task_history_widget = TaskHistoryWidget(data_dir)
         self.tab_widget.addTab(
             self.task_history_widget,
             ThemeIcons.icon("list", 17, "#0ea5e9"),
@@ -7475,7 +7541,7 @@ class EnhancedDetectionUI(QMainWindow):
     def select_save_directory(self):
         """选择默认结果保存目录"""
         start_dir = self.default_save_dir if Path(
-            self.default_save_dir).exists() else str(base_dir)
+            self.default_save_dir).exists() else str(data_dir)
         directory = QFileDialog.getExistingDirectory(
             self, "选择默认结果保存目录", start_dir)
         if directory:
@@ -8498,7 +8564,7 @@ class EnhancedDetectionUI(QMainWindow):
             return
 
         start_dir = self.default_save_dir if Path(
-            self.default_save_dir).exists() else str(base_dir)
+            self.default_save_dir).exists() else str(data_dir)
         save_dir = QFileDialog.getExistingDirectory(self, "选择保存目录", start_dir)
         if not save_dir:
             return
@@ -8704,7 +8770,8 @@ class EnhancedDetectionUI(QMainWindow):
     def create_enhanced_icon(self, size=64):
         """创建增强的应用图标"""
         icon = QIcon()
-        icon.addFile("./assets/icons/dimension_logo.png")
+        icon_file = base_dir / "assets" / "icons" / "dimension_logo.png"
+        icon.addFile(str(icon_file))
 
         return icon
 

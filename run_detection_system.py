@@ -10,6 +10,10 @@ from pathlib import Path
 
 # 添加项目路径到系统路径
 current_dir = Path(__file__).parent
+if getattr(sys, "frozen", False):
+    app_dir = Path(sys.executable).resolve().parent
+else:
+    app_dir = current_dir
 sys.path.insert(0, str(current_dir))
 
 
@@ -59,7 +63,7 @@ def create_directories():
     ]
 
     for directory in directories:
-        dir_path = current_dir / directory
+        dir_path = app_dir / directory
         if not dir_path.exists():
             dir_path.mkdir(parents=True, exist_ok=True)
             print(f"📁 创建目录: {directory}")
