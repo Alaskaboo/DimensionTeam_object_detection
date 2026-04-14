@@ -1,7 +1,14 @@
-
-pyinstaller --onefile --name "UniversalObjectDetection" --add-data "csv_reports;csv_reports" --add-data "models;models" --add-data "docs;docs" --hidden-import=PySide6 --hidden-import=PySide6.QtCore --hidden-import=PySide6.QtGui --hidden-import=PySide6.QtWidgets --hidden-import=ultralytics --hidden-import=cv2 --hidden-import=requests --hidden-import=numpy --hidden-import=PIL --collect-all=ultralytics --collect-all=PySide6 --windowed detection_main.py
-
-pyinstaller --onefile --name "UniversalObjectDetection" --add-data "csv_reports;csv_reports"  --collect-all=ultralytics --collect-all=PySide6 --windowed enhanced_ui_main.py
-
-
-
+pyinstaller `
+  --noconfirm --clean `
+  --onedir --windowed `
+  --name DimensionObjectDetection `
+  --add-data "assets;assets" `
+  --add-data "docs;docs" `
+  --add-data "csv_reports;csv_reports" `
+  --hidden-import openpyxl `
+  --hidden-import PySide6.QtSvg `
+  --collect-all ultralytics `
+  --collect-submodules torch `
+  --collect-submodules torchvision `
+  --collect-binaries cv2 `
+  run_detection_system.py
