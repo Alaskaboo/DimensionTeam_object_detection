@@ -5809,6 +5809,44 @@ class EnhancedDetectionUI(QMainWindow):
             self.realtime_detail_panel.setVisible(index in (0, 1))
         self._sync_source_options_for_tab(index)
         # 避免“文件检测”实时结果串到“批量分析”页签：切页时按当前页语义重绘底部明细。
+        if index == 0 and hasattr(self, "result_detail_widget"):
+            # 从批量回到文件时，底部明细仍停留在批量表：按最后一次文件检测回调状态恢复。
+            ctx = getattr(self, "_last_realtime_overlay_ctx", None)
+            if ctx:
+                results = ctx.get("results")
+                class_names = ctx.get("class_names") or []
+                infer_s = float(ctx.get("inference_time") or 0.0)
+                self.result_detail_widget.update_results(
+                    results, class_names, infer_s)
+                try:
+                    if results and results[0].boxes is not None and len(results[0].boxes) > 0:
+                        self._status_objects.setText(str(len(results[0].boxes)))
+                    else:
+                        self._status_objects.setText("0")
+                    self._status_latency.setText(f"{infer_s * 1000:.0f} 毫秒")
+                    vt = getattr(self, "_video_time_overlay", None)
+                    if (
+                        getattr(self, "current_source_type", None) == "video"
+                        and vt is not None
+                        and len(vt) >= 4
+                        and float(vt[3]) > 1e-6
+                    ):
+                        self._status_fps.setText(f"{float(vt[3]):.1f}")
+                    elif infer_s > 1e-9:
+                        self._status_fps.setText(f"{1.0 / infer_s:.2f}")
+                    else:
+                        self._status_fps.setText("-")
+                except Exception:
+                    self._status_objects.setText("-")
+                    self._status_fps.setText("-")
+                    self._status_latency.setText("-")
+                self._sync_wireframe_overview_from_status()
+            else:
+                self.result_detail_widget.update_results(None, [], 0.0)
+                self._status_objects.setText("-")
+                self._status_fps.setText("-")
+                self._status_latency.setText("-")
+                self._sync_wireframe_overview_from_status()
         if index == 1 and hasattr(self, "result_detail_widget"):
             if getattr(self, "batch_results", None):
                 idx = int(getattr(self, "current_batch_index", 0) or 0)
